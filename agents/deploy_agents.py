@@ -31,9 +31,9 @@ load_dotenv()
 
 # Import the tool schemas from the orchestrator package. Run from the repo root.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from services.orchestrator import tools  # noqa: E402
-
 import os  # noqa: E402
+
+from services.orchestrator import tools  # noqa: E402
 
 DEFS = pathlib.Path(__file__).resolve().parent / "definitions"
 ENDPOINT = os.environ["PROJECT_ENDPOINT"]

@@ -90,7 +90,7 @@ def search_client() -> SearchClient:
 
 def build_index(recreate: bool) -> None:
     ic = index_client()
-    existing = [i for i in ic.list_index_names()]
+    existing = list(ic.list_index_names())
 
     if INDEX_NAME in existing:
         if not recreate:

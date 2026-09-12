@@ -1,0 +1,103 @@
+name: CI
+
+# Runs on every push and every pull request. Nothing here touches Azure, so it
+# needs no credentials and costs nothing - which is why it can run on every
+# commit without anyone thinking about it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-service.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        run: pytest -q
+
+      # The agent definitions are data, not code, so nothing else would catch a
+      # broken one until deploy time. Checks the JSON parses, the required keys
+      # exist, and every tool named is a tool that actually exists.
+      - name: Validate agent definitions
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          sys.path.insert(0, ".")
+          from services.orchestrator import tools
+
+          failed = False
+          for f in sorted(pathlib.Path("agents/definitions").glob("*.json")):
+              try:
+                  spec = json.loads(f.read_text())
+              except json.JSONDecodeError as e:
+                  print(f"FAIL {f.name}: invalid JSON: {e}")
+                  failed = True
+                  continue
+
+              for key in ("name", "model", "instructions"):
+                  if not spec.get(key):
+                      print(f"FAIL {f.name}: missing '{key}'")
+                      failed = True
+
+              if spec.get("name") != f.stem:
+                  print(f"FAIL {f.name}: name '{spec.get('name')}' does not match filename")
+                  failed = True
+
+              unknown = [t for t in spec.get("tools", []) if t not in tools.SCHEMAS]
+              if unknown:
+                  print(f"FAIL {f.name}: unknown tools {unknown}")
+                  failed = True
+
+              if not failed:
+                  print(f"ok   {f.name}  ({len(spec['instructions'])} chars, tools={spec.get('tools', [])})")
+
+          sys.exit(1 if failed else 0)
+          PY
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build only - no push yet. Catches a broken Dockerfile at PR time rather
+      # than at deploy time.
+      - name: Build image
+        run: docker build -t autoassist:ci .
+
+      - name: Check it starts and answers /health
+        run: |
+          docker run -d --name ci -p 8000:8000 \
+            -e PROJECT_ENDPOINT=https://example.invalid/api/projects/none \
+            autoassist:ci
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "healthy after ${i}s"
+              curl -s http://localhost:8000/health
+              docker rm -f ci
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "never became healthy:"
+          docker logs ci
+          docker rm -f ci
+          exit 1

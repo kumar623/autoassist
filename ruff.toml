@@ -1,0 +1,26 @@
+# Line length 110: these files carry a lot of explanatory comments and prompt
+# text, and wrapping at 88 made them harder to read, not easier.
+line-length = 110
+target-version = "py39"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes - real bugs: unused names, undefined names
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear - likely mistakes
+    "C4",   # comprehension style
+]
+ignore = [
+    "E501",  # line length: enforced by the formatter, not worth failing CI over
+    "B008",  # function call in default arg - FastAPI depends on this pattern
+    "UP007", # X | Y unions - this runs on Python 3.9 locally
+    "UP045",
+]
+
+[lint.per-file-ignores]
+# Tests import modules after setting environment variables, which has to happen
+# before the import. E402 would flag that, and it is correct here.
+"tests/*" = ["E402"]
+"agents/*" = ["E402"]

@@ -149,7 +149,7 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
     with _LOCK:
         data = _load()
 
-        for ref, b in data["bookings"].items():
+        for b in data["bookings"].values():
             if b["slot_id"] == slot_id and b.get("status") == "confirmed":
                 return {
                     "ok": False,
