@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoAssist — vehicle service assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #1b1f24;
+    --muted: #6b7480;
+    --line: #e3e6ea;
+    --accent: #1f5f8b;
+    --safety: #b3261e;
+    --safety-bg: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --panel: #1c2024; --ink: #e8eaed; --muted: #98a1ac;
+      --line: #2c3237; --accent: #6fb3dd; --safety: #f2b8b5; --safety-bg: #3a1f1d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    background: var(--panel); display: flex; align-items: baseline; gap: 12px;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; }
+  header span { color: var(--muted); font-size: 13px; }
+  #status { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #log { flex: 1; overflow-y: auto; padding: 20px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .msg { margin-bottom: 18px; display: flex; gap: 10px; }
+  .msg .who {
+    flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 12px; font-weight: 700;
+    background: var(--line); color: var(--muted);
+  }
+  .msg.you .who { background: var(--accent); color: #fff; }
+  .bubble {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px; white-space: pre-wrap; min-width: 0;
+  }
+  .msg.you .bubble { background: transparent; border-color: transparent; padding-left: 0; }
+  .bubble.safety { border-color: var(--safety); background: var(--safety-bg); }
+  .meta {
+    margin-top: 8px; font-size: 12px; color: var(--muted);
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .tag {
+    border: 1px solid var(--line); border-radius: 20px; padding: 1px 8px;
+    background: var(--bg);
+  }
+  .tag.warn { border-color: var(--safety); color: var(--safety); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; overflow-x: auto; font-size: 12px; margin: 8px 0 0;
+  }
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 20px; }
+  form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--ink); font: inherit; min-width: 0;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: 11px 18px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .examples { max-width: 760px; margin: 8px auto 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .examples button {
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+    font-size: 12px; padding: 4px 10px; font-weight: 400;
+  }
+  .hint { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AutoAssist</h1>
+  <span>vehicle service assistant</span>
+  <span id="status">checking…</span>
+</header>
+
+<div id="log">
+  <div class="wrap">
+    <div class="msg">
+      <div class="who">AA</div>
+      <div>
+        <div class="bubble">Hello. I can look up fault codes and warning lights, tell you when parts are due for replacement, and book a service slot.
+
+Everything I say about your vehicle comes from the workshop's service documents. If they don't cover your question, I'll say so rather than guess.</div>
+        <div class="hint" style="margin-top:8px">Try one of these:</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <form id="f">
+    <input type="text" id="q" placeholder="Describe the problem, or ask about a fault code…" autocomplete="off" autofocus>
+    <button type="submit" id="send">Send</button>
+  </form>
+  <div class="examples">
+    <button type="button" data-q="What does P0420 mean and is it safe to drive?">P0420</button>
+    <button type="button" data-q="How often should brake fluid be changed?">Brake fluid interval</button>
+    <button type="button" data-q="My brakes feel spongy">Spongy brakes</button>
+    <button type="button" data-q="What slots are free on Saturday?">Saturday slots</button>
+    <button type="button" data-q="P0420 is showing, can I book in for Saturday?">Both at once</button>
+  </div>
+</footer>
+
+<script>
+const log = document.getElementById('log').firstElementChild;
+const form = document.getElementById('f');
+const box = document.getElementById('q');
+const send = document.getElementById('send');
+const status = document.getElementById('status');
+
+function add(who, text, cls) {
+  const row = document.createElement('div');
+  row.className = 'msg' + (who === 'You' ? ' you' : '');
+  const av = document.createElement('div');
+  av.className = 'who';
+  av.textContent = who === 'You' ? 'You' : 'AA';
+  const col = document.createElement('div');
+  const bub = document.createElement('div');
+  bub.className = 'bubble' + (cls ? ' ' + cls : '');
+  bub.textContent = text;
+  col.appendChild(bub);
+  row.appendChild(av);
+  row.appendChild(col);
+  log.appendChild(row);
+  log.parentElement.scrollTop = log.parentElement.scrollHeight;
+  return col;
+}
+
+function meta(col, data) {
+  const m = document.createElement('div');
+  m.className = 'meta';
+
+  const agents = document.createElement('span');
+  agents.className = 'tag';
+  agents.textContent = data.agents.join(' → ');
+  m.appendChild(agents);
+
+  const s = document.createElement('span');
+  s.className = 'tag';
+  s.textContent = data.searched ? 'searched documents' : 'no document search';
+  m.appendChild(s);
+
+  if (data.safety) {
+    const w = document.createElement('span');
+    w.className = 'tag warn';
+    w.textContent = 'safety flagged';
+    m.appendChild(w);
+  }
+
+  const t = document.createElement('span');
+  t.textContent = `${data.tokens} tokens · ${(data.ms / 1000).toFixed(1)}s`;
+  m.appendChild(t);
+
+  col.appendChild(m);
+
+  const d = document.createElement('details');
+  const sum = document.createElement('summary');
+  sum.textContent = 'what happened';
+  const pre = document.createElement('pre');
+  pre.textContent = JSON.stringify(data.trace, null, 2);
+  d.appendChild(sum);
+  d.appendChild(pre);
+  col.appendChild(d);
+}
+
+async function askServer(text) {
+  add('You', text);
+  box.value = '';
+  send.disabled = true;
+  const col = add('AA', '…');
+  const bubble = col.firstElementChild;
+
+  try {
+    const r = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: text})
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({detail: r.statusText}));
+      bubble.textContent = 'Something went wrong: ' + (err.detail || r.status);
+      return;
+    }
+    const data = await r.json();
+    bubble.textContent = data.reply;
+    if (data.safety) bubble.classList.add('safety');
+    meta(col, data);
+  } catch (e) {
+    bubble.textContent = 'Could not reach the service. Is it running?';
+  } finally {
+    send.disabled = false;
+    box.focus();
+    log.parentElement.scrollTop = log.parentElement.scrollHeight;
+  }
+}
+
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  const text = box.value.trim();
+  if (text) askServer(text);
+});
+
+document.querySelectorAll('.examples button').forEach(b => {
+  b.addEventListener('click', () => askServer(b.dataset.q));
+});
+
+fetch('/ready')
+  .then(r => r.json().then(j => ({ok: r.ok, j})))
+  .then(({ok, j}) => {
+    status.textContent = ok ? `ready · ${j.agents.length} agents` : 'not ready';
+    if (!ok) status.style.color = 'var(--safety)';
+  })
+  .catch(() => { status.textContent = 'offline'; status.style.color = 'var(--safety)'; });
+</script>
+
+</body>
+</html>

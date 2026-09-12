@@ -1,0 +1,29 @@
+item,interval_km,interval_months,notes,typical_duration_min
+Engine oil and filter,10000,12,Use the grade listed in the owner handbook. Shorten to 5000 km in heavy city traffic or dusty conditions.,45
+Engine air filter,20000,24,Inspect every service. Replace early if driven on dusty or unpaved roads.,20
+Cabin air filter,15000,12,Replace more often in polluted cities. A musty smell from the vents is the usual sign.,15
+Fuel filter (petrol),40000,48,In-tank filters on many models are replaced with the pump assembly.,60
+Fuel filter (diesel),20000,24,Drain water from the separator at every service.,60
+Spark plugs (copper),30000,36,Check gap at every second service.,45
+Spark plugs (iridium),80000,72,Do not clean iridium plugs with abrasives.,45
+Brake fluid,40000,24,Brake fluid absorbs moisture over time regardless of distance driven. Replace on time even if the car is barely used.,45
+Brake pads (front),40000,0,Inspect at every service. Replace when friction material is below 3 mm.,60
+Brake pads (rear),60000,0,Inspect at every service. Rear pads usually last longer than front.,60
+Brake discs,80000,0,Measure thickness against the minimum stamped on the disc.,90
+Coolant,60000,48,Use only the coolant type specified. Mixing types causes gelling.,60
+Transmission fluid (automatic),60000,48,Some sealed units are lifetime fill. Check the handbook before draining.,90
+Transmission fluid (manual),80000,60,Check for metal particles on the drain plug magnet.,60
+Timing belt,100000,72,Replace the tensioner and water pump at the same time. A snapped belt on an interference engine destroys the engine.,240
+Timing chain,0,0,No fixed interval. Investigate rattle on cold start as a possible stretched chain.,0
+Serpentine/accessory belt,60000,48,Look for cracks glazing and fraying at every service.,45
+Battery,0,48,Test capacity at every service after three years. Indian summer heat shortens battery life.,15
+Tyres rotation,10000,12,Rotate front to rear to even out wear.,30
+Wheel alignment,20000,24,Also needed after hitting a large pothole or kerb.,45
+Wheel balancing,20000,24,Vibration in the steering at highway speed is the usual sign.,45
+Air conditioning service,0,24,Check refrigerant charge and cabin filter together.,60
+Wiper blades,0,12,Replace when they streak or chatter.,10
+Suspension inspection,20000,12,Check bushes shock absorbers and ball joints for play.,45
+Exhaust system inspection,20000,12,Check for leaks rust and loose mountings.,30
+Clutch inspection,40000,24,Check pedal free play and for slipping under load.,45
+Differential oil,60000,48,Applies to rear wheel drive and four wheel drive vehicles.,60
+Power steering fluid,60000,48,Not applicable to electric power steering systems.,45

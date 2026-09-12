@@ -1,0 +1,85 @@
+"""Tests for the tool layer.
+
+The contract that matters: execute() must NEVER raise. A tool that throws kills
+the whole run; a tool that returns an error string lets the model tell the
+customer something honest.
+"""
+
+import os
+import pathlib
+import tempfile
+
+import pytest
+
+os.environ.setdefault("BOOKING_STORE", str(pathlib.Path(tempfile.gettempdir()) / "aa_tools_bookings.json"))
+os.environ.setdefault("TICKET_STORE", str(pathlib.Path(tempfile.gettempdir()) / "aa_tools_tickets.json"))
+
+from services.orchestrator import booking, tools  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def clean_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(booking, "STORE", tmp_path / "bookings.json")
+    monkeypatch.setattr(booking, "TICKETS", tmp_path / "tickets.json")
+    yield
+
+
+def test_every_schema_has_a_handler():
+    assert set(tools.SCHEMAS) == set(tools.HANDLERS)
+
+
+def test_schemas_are_well_formed():
+    for name, s in tools.SCHEMAS.items():
+        assert s["type"] == "function"
+        fn = s["function"]
+        assert fn["name"] == name
+        assert fn["description"], f"{name} has no description - the model uses this to decide when to call it"
+        params = fn["parameters"]
+        assert params["type"] == "object"
+        for req in params["required"]:
+            assert req in params["properties"], f"{name} requires '{req}' but does not define it"
+
+
+def test_schemas_for_rejects_unknown_names():
+    with pytest.raises(KeyError):
+        tools.schemas_for(["search_service_docs", "make_tea"])
+
+
+def test_unknown_tool_returns_an_error_not_an_exception():
+    out = tools.execute("make_tea", "{}")
+    assert out.startswith("ERROR:")
+
+
+def test_broken_json_arguments_return_an_error():
+    out = tools.execute("get_available_slots", "{not json")
+    assert out.startswith("ERROR:")
+
+
+def test_wrong_arguments_return_an_error():
+    out = tools.execute("book_service_slot", '{"wrong": "shape"}')
+    assert out.startswith("ERROR:")
+
+
+def test_non_object_arguments_return_an_error():
+    out = tools.execute("get_available_slots", '["a", "list"]')
+    assert out.startswith("ERROR:")
+
+
+def test_get_slots_returns_json():
+    out = tools.execute("get_available_slots", "{}")
+    assert '"ok": true' in out.lower()
+
+
+def test_booking_through_the_tool_layer():
+    import json
+
+    slots = json.loads(tools.execute("get_available_slots", "{}"))
+    slot_id = slots["slots"][0]["slot_id"]
+    out = json.loads(
+        tools.execute(
+            "book_service_slot",
+            json.dumps({"slot_id": slot_id, "registration": "AP31AB1234", "issue": "noise"}),
+        )
+    )
+    assert out["ok"]
+    assert out["reference"].startswith("AA-")

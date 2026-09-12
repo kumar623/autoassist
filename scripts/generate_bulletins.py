@@ -1,0 +1,194 @@
+"""Generate synthetic service bulletins as PDFs.
+
+These are FICTIONAL documents written by an LLM for a portfolio project.
+They are not real manufacturer bulletins. Every file says so on page 1.
+
+Usage:
+    python scripts/generate_bulletins.py --count 30
+"""
+
+import argparse
+import json
+import os
+import pathlib
+import random
+import re
+import sys
+
+from dotenv import load_dotenv
+from openai import AzureOpenAI
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+
+load_dotenv()
+
+OUT_DIR = pathlib.Path(__file__).resolve().parents[1] / "data" / "synthetic_bulletins"
+
+# Fictional models so nothing maps onto a real manufacturer's vehicle.
+MODELS = [
+    "Corvale S1 1.2L petrol",
+    "Corvale S1 1.5L diesel",
+    "Corvale Vantis 1.0L turbo petrol",
+    "Corvale Vantis 1.5L diesel",
+    "Corvale Trailix 2.0L diesel",
+    "Corvale Zeta EV",
+]
+
+TOPICS = [
+    "rough idle after cold start",
+    "check engine light with catalytic converter code",
+    "rattling noise from the front suspension over speed breakers",
+    "air conditioning not cooling below 24 degrees in city traffic",
+    "battery drain when the car is parked for more than four days",
+    "steering vibration between 80 and 100 km/h",
+    "hard starting in the morning during monsoon",
+    "fuel gauge reading incorrectly after refuelling",
+    "infotainment screen rebooting while reversing",
+    "clutch pedal feeling spongy",
+    "brake squeal when braking gently at low speed",
+    "power windows operating slowly on the driver side",
+    "excessive white smoke from the exhaust on start-up",
+    "coolant level dropping with no visible leak",
+    "automatic transmission jerking between second and third gear",
+    "headlight condensation after washing the car",
+    "engine oil consumption higher than expected",
+    "reverse camera image flickering",
+    "horn working intermittently",
+    "door lock actuator not responding to remote key",
+    "EGR valve carbon buildup causing reduced power",
+    "wheel bearing hum increasing with speed",
+    "rear wiper motor not parking correctly",
+    "tyre pressure warning with correct pressures",
+    "misfire on cylinder one under load",
+    "turbocharger whistle under acceleration",
+    "steering wheel off centre after alignment",
+    "seat belt pretensioner warning light",
+    "charging port door not opening on the EV",
+    "range dropping sharply in cold weather on the EV",
+]
+
+PROMPT = """Write a fictional automotive service bulletin for a training dataset.
+
+Vehicle: {model}
+Issue: {topic}
+Bulletin number: {number}
+
+Write it in the style of a real technical service bulletin, with these sections:
+- Summary (2 sentences)
+- Affected Vehicles (model, fictional VIN range, fictional production date range)
+- Symptoms (3-5 bullet points a customer would notice)
+- Probable Cause (one short paragraph, technically plausible)
+- Diagnostic Procedure (5-7 numbered steps a technician would follow, with specific
+  measurements and expected values where sensible)
+- Repair Procedure (4-6 numbered steps, with torque values and part numbers that are
+  clearly fictional)
+- Parts Required (a short list with fictional part numbers)
+- Labour Time (a figure in hours)
+- Warranty Information (one or two sentences)
+
+Keep it technically sensible and realistic in tone. Do not mention any real car
+manufacturer, brand, or real part number. Plain text only, no markdown formatting
+symbols. Use ALL CAPS for section headings.
+"""
+
+
+def client() -> AzureOpenAI:
+    endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
+    return AzureOpenAI(
+        azure_endpoint=endpoint,
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+    )
+
+
+def build_pdf(path: pathlib.Path, number: str, model: str, topic: str, body: str) -> None:
+    styles = getSampleStyleSheet()
+    heading = ParagraphStyle(
+        "H", parent=styles["Heading2"], spaceBefore=10, spaceAfter=4, fontSize=11
+    )
+    normal = ParagraphStyle(
+        "N", parent=styles["BodyText"], fontSize=9.5, leading=13, spaceAfter=4
+    )
+    disclaimer = ParagraphStyle(
+        "D", parent=styles["BodyText"], fontSize=8, textColor="#888888", spaceAfter=10
+    )
+
+    doc = SimpleDocTemplate(
+        str(path),
+        pagesize=A4,
+        title=f"{number} - {topic}",
+        author="AutoAssist synthetic data generator",
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+    )
+
+    flow = [
+        Paragraph(f"SERVICE BULLETIN {number}", styles["Title"]),
+        Paragraph(f"{model} &mdash; {topic}", styles["Heading3"]),
+        Paragraph(
+            "SYNTHETIC DOCUMENT. Generated by a language model for a portfolio "
+            "project. Not a real bulletin. Corvale is a fictional manufacturer. "
+            "Do not use for actual vehicle repair.",
+            disclaimer,
+        ),
+        Spacer(1, 4 * mm),
+    ]
+
+    for block in [b.strip() for b in body.split("\n") if b.strip()]:
+        if re.match(r"^[A-Z][A-Z \-/]{4,}$", block):
+            flow.append(Paragraph(block, heading))
+        else:
+            flow.append(Paragraph(block.replace("&", "&amp;"), normal))
+
+    doc.build(flow)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--count", type=int, default=30)
+    parser.add_argument("--model", default=os.getenv("CHAT_DEPLOYMENT", "gpt-4.1-mini"))
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    random.seed(args.seed)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    oai = client()
+
+    pairs = [(random.choice(MODELS), t) for t in TOPICS]
+    random.shuffle(pairs)
+    pairs = pairs[: args.count]
+
+    manifest = []
+    for i, (model, topic) in enumerate(pairs, start=1):
+        number = f"TSB-{i:03d}"
+        path = OUT_DIR / f"{number}.pdf"
+        if path.exists():
+            print(f"skip  {number} (already exists)")
+            continue
+
+        resp = oai.chat.completions.create(
+            model=args.model,
+            messages=[{"role": "user", "content": PROMPT.format(model=model, topic=topic, number=number)}],
+            temperature=0.8,
+            max_tokens=1400,
+        )
+        body = resp.choices[0].message.content or ""
+        build_pdf(path, number, model, topic, body)
+        manifest.append({"number": number, "model": model, "topic": topic, "file": path.name})
+        print(f"wrote {number}  {topic}")
+
+    if manifest:
+        mpath = OUT_DIR / "manifest.json"
+        existing = json.loads(mpath.read_text()) if mpath.exists() else []
+        mpath.write_text(json.dumps(existing + manifest, indent=2))
+
+    print(f"\nDone. PDFs are in {OUT_DIR}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,14 @@
+# Pinned exactly. These SDKs renamed methods between minor versions during
+# preview - `>=` let pip pull a version whose API did not match the code.
+azure-ai-projects==2.4.0
+azure-ai-agents==1.1.0
+azure-identity==1.25.3
+azure-search-documents==12.0.0
+openai==2.48.0
+python-dotenv==1.2.1
+pymupdf==1.26.5
+reportlab==5.0.1
+
+# dev
+pytest==8.4.2
+ruff==0.16.7

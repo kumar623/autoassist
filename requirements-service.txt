@@ -1,0 +1,5 @@
+# Web service only. Kept apart from requirements.txt so the ingestion and eval
+# scripts do not drag a web framework along with them.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.13.5

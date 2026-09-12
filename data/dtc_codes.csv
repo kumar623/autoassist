@@ -1,0 +1,64 @@
+code,system,title,plain_meaning,common_causes,severity,safe_to_drive
+P0010,Powertrain,Camshaft Position Actuator Circuit (Bank 1),The electrical circuit controlling variable valve timing on bank 1 has a fault.,Faulty camshaft actuator solenoid; wiring or connector damage; low or dirty engine oil,medium,yes-with-care
+P0011,Powertrain,Camshaft Position Timing Over-Advanced (Bank 1),Valve timing is more advanced than the engine computer expected.,Dirty or low engine oil; stuck oil control valve; worn timing chain,medium,yes-with-care
+P0016,Powertrain,Crankshaft/Camshaft Position Correlation (Bank 1 Sensor A),The crankshaft and camshaft are out of step with each other.,Stretched or jumped timing chain; failed cam or crank sensor; oil control valve stuck,high,no
+P0030,Powertrain,HO2S Heater Control Circuit (Bank 1 Sensor 1),The heater inside the front oxygen sensor is not working.,Failed oxygen sensor heater; blown fuse; broken wiring,low,yes
+P0071,Powertrain,Ambient Air Temperature Sensor Range/Performance,The outside air temperature reading looks wrong.,Failed ambient temperature sensor; wiring fault; sensor blocked by debris,low,yes
+P0087,Powertrain,Fuel Rail/System Pressure Too Low,Fuel pressure is below what the engine needs.,Clogged fuel filter; weak fuel pump; leaking pressure regulator; restricted fuel line,high,no
+P0101,Powertrain,Mass Air Flow Circuit Range/Performance,The air flow sensor reading does not match what the engine is actually doing.,Dirty MAF sensor; air filter clogged; vacuum leak; leaking intake boot,medium,yes-with-care
+P0102,Powertrain,Mass Air Flow Circuit Low Input,The air flow sensor is reporting less air than is possible.,Disconnected or dirty MAF sensor; wiring short; severely blocked air filter,medium,yes-with-care
+P0113,Powertrain,Intake Air Temperature Sensor Circuit High Input,The intake air temperature sensor is reading abnormally high.,Failed IAT sensor; open circuit in wiring; corroded connector,low,yes
+P0117,Powertrain,Engine Coolant Temperature Circuit Low Input,The coolant temperature sensor is reading abnormally low.,Failed coolant temperature sensor; short in wiring; bad connector,medium,yes-with-care
+P0121,Powertrain,Throttle Position Sensor Range/Performance,The throttle position reading does not match engine behaviour.,Dirty throttle body; failing throttle position sensor; damaged wiring,medium,yes-with-care
+P0128,Powertrain,Coolant Thermostat Below Regulating Temperature,The engine is not warming up as fast as it should.,Thermostat stuck open; failed coolant temperature sensor; low coolant level,low,yes
+P0131,Powertrain,O2 Sensor Circuit Low Voltage (Bank 1 Sensor 1),The front oxygen sensor voltage is stuck low.,Failed oxygen sensor; exhaust leak before the sensor; wiring fault,medium,yes-with-care
+P0133,Powertrain,O2 Sensor Circuit Slow Response (Bank 1 Sensor 1),The front oxygen sensor is reacting too slowly.,Aged oxygen sensor; contamination from oil or coolant burning; exhaust leak,medium,yes-with-care
+P0135,Powertrain,O2 Sensor Heater Circuit (Bank 1 Sensor 1),The heater in the front oxygen sensor has failed.,Failed sensor heater element; blown fuse; damaged wiring harness,low,yes
+P0136,Powertrain,O2 Sensor Circuit Malfunction (Bank 1 Sensor 2),The rear oxygen sensor signal is faulty.,Failed rear oxygen sensor; exhaust leak near sensor; corroded connector,medium,yes-with-care
+P0171,Powertrain,System Too Lean (Bank 1),The engine is getting too much air or not enough fuel.,Vacuum leak; dirty MAF sensor; weak fuel pump; clogged fuel filter; leaking intake gasket,medium,yes-with-care
+P0172,Powertrain,System Too Rich (Bank 1),The engine is getting too much fuel or not enough air.,Leaking fuel injector; failed fuel pressure regulator; dirty air filter; faulty oxygen sensor,medium,yes-with-care
+P0174,Powertrain,System Too Lean (Bank 2),Bank 2 of the engine is getting too much air or not enough fuel.,Vacuum leak on bank 2; dirty MAF sensor; weak fuel delivery,medium,yes-with-care
+P0300,Powertrain,Random/Multiple Cylinder Misfire Detected,More than one cylinder is misfiring and the computer cannot tell which.,Worn spark plugs; failing ignition coils; vacuum leak; low fuel pressure; low compression,high,no
+P0301,Powertrain,Cylinder 1 Misfire Detected,Cylinder 1 is not burning fuel properly.,Worn spark plug; failed ignition coil; clogged injector; low compression in that cylinder,high,no
+P0302,Powertrain,Cylinder 2 Misfire Detected,Cylinder 2 is not burning fuel properly.,Worn spark plug; failed ignition coil; clogged injector; low compression in that cylinder,high,no
+P0303,Powertrain,Cylinder 3 Misfire Detected,Cylinder 3 is not burning fuel properly.,Worn spark plug; failed ignition coil; clogged injector; low compression in that cylinder,high,no
+P0304,Powertrain,Cylinder 4 Misfire Detected,Cylinder 4 is not burning fuel properly.,Worn spark plug; failed ignition coil; clogged injector; low compression in that cylinder,high,no
+P0325,Powertrain,Knock Sensor 1 Circuit (Bank 1),The sensor that listens for engine knock has a circuit fault.,Failed knock sensor; damaged wiring; loose sensor mounting,medium,yes-with-care
+P0335,Powertrain,Crankshaft Position Sensor A Circuit,The sensor that tracks crankshaft rotation is faulty.,Failed crankshaft position sensor; damaged reluctor ring; wiring fault,high,no
+P0340,Powertrain,Camshaft Position Sensor A Circuit (Bank 1),The sensor that tracks camshaft position is faulty.,Failed camshaft position sensor; wiring or connector damage; timing chain issue,high,no
+P0401,Powertrain,Exhaust Gas Recirculation Flow Insufficient,Not enough exhaust gas is being recirculated back into the engine.,Clogged EGR passages; stuck EGR valve; failed EGR position sensor; carbon buildup,medium,yes-with-care
+P0402,Powertrain,Exhaust Gas Recirculation Flow Excessive,Too much exhaust gas is being recirculated.,EGR valve stuck open; failed EGR solenoid; carbon holding the valve open,medium,yes-with-care
+P0411,Powertrain,Secondary Air Injection System Incorrect Flow,The secondary air pump system is not flowing correctly.,Failed air pump; blocked air passages; stuck check valve,low,yes
+P0420,Powertrain,Catalyst System Efficiency Below Threshold (Bank 1),The catalytic converter is not cleaning the exhaust as well as it should.,Worn catalytic converter; failed rear oxygen sensor; exhaust leak; engine running rich or lean for a long time,medium,yes-with-care
+P0430,Powertrain,Catalyst System Efficiency Below Threshold (Bank 2),The bank 2 catalytic converter is not cleaning the exhaust well enough.,Worn catalytic converter; failed rear oxygen sensor; exhaust leak,medium,yes-with-care
+P0440,Powertrain,Evaporative Emission Control System Malfunction,The fuel vapour system has a general fault.,Loose or faulty fuel cap; cracked vapour hose; failed purge valve,low,yes
+P0442,Powertrain,Evaporative Emission System Leak Detected (Small Leak),A small leak was found in the fuel vapour system.,Loose fuel cap; small crack in a vapour hose; failed purge or vent valve,low,yes
+P0455,Powertrain,Evaporative Emission System Leak Detected (Large Leak),A large leak was found in the fuel vapour system.,Missing or badly sealed fuel cap; disconnected vapour hose; failed vent valve,low,yes
+P0456,Powertrain,Evaporative Emission System Leak Detected (Very Small Leak),A very small leak was found in the fuel vapour system.,Fuel cap seal worn; hairline crack in vapour line; sticking vent valve,low,yes
+P0500,Powertrain,Vehicle Speed Sensor A,The vehicle speed signal is missing or wrong.,Failed speed sensor; damaged wiring; faulty ABS module,medium,yes-with-care
+P0505,Powertrain,Idle Air Control System,The engine cannot hold a steady idle.,Dirty throttle body; failed idle air control valve; vacuum leak,medium,yes-with-care
+P0506,Powertrain,Idle Air Control System RPM Lower Than Expected,The engine idles slower than it should.,Carbon buildup in throttle body; sticking IAC valve; vacuum restriction,low,yes
+P0507,Powertrain,Idle Air Control System RPM Higher Than Expected,The engine idles faster than it should.,Vacuum leak; stuck throttle plate; failed IAC valve,medium,yes-with-care
+P0562,Powertrain,System Voltage Low,The electrical system voltage is below normal.,Failing alternator; worn battery; loose or corroded battery terminals; bad ground,high,no
+P0563,Powertrain,System Voltage High,The electrical system voltage is above normal.,Faulty voltage regulator; failing alternator; bad battery connection,high,no
+P0606,Powertrain,PCM Processor Fault,The engine control module itself has an internal fault.,Failed engine control module; power or ground fault to the module; water ingress,high,no
+P0700,Powertrain,Transmission Control System Malfunction,The transmission control system has logged a fault.,Transmission fault stored separately; low transmission fluid; failed solenoid; wiring fault,high,no
+P0730,Powertrain,Incorrect Gear Ratio,The gear engaged does not match the gear commanded.,Low or burnt transmission fluid; worn clutch packs; failed shift solenoid,high,no
+P0741,Powertrain,Torque Converter Clutch Circuit Performance,The torque converter lock-up clutch is slipping or not engaging.,Failed torque converter clutch solenoid; low transmission fluid; worn converter,medium,yes-with-care
+P0755,Powertrain,Shift Solenoid B Malfunction,A transmission shift solenoid is not working.,Failed shift solenoid; dirty transmission fluid; wiring fault,high,no
+B0010,Body,Driver Frontal Stage 1 Deployment Control,A fault in the driver airbag deployment circuit.,Failed airbag clock spring; damaged wiring under seat; faulty airbag module,high,no
+B0081,Body,Driver Seat Position Sensor,The driver seat position sensor is faulty.,Failed position sensor; damaged wiring under the seat,low,yes
+B1318,Body,Battery Voltage Low,The body control module sees low battery voltage.,Weak battery; failing alternator; corroded terminals,medium,yes-with-care
+C0035,Chassis,Left Front Wheel Speed Sensor Circuit,The left front wheel speed sensor signal is faulty.,Failed wheel speed sensor; damaged wiring at the wheel; dirty tone ring,high,no
+C0040,Chassis,Right Front Wheel Speed Sensor Circuit,The right front wheel speed sensor signal is faulty.,Failed wheel speed sensor; damaged wiring at the wheel; dirty tone ring,high,no
+C0045,Chassis,Left Rear Wheel Speed Sensor Circuit,The left rear wheel speed sensor signal is faulty.,Failed wheel speed sensor; harness damage; corroded connector,high,no
+C0051,Chassis,Steering Wheel Position Sensor,The steering angle sensor is reporting a fault.,Sensor needs recalibration after alignment; failed sensor; clock spring fault,high,no
+C0110,Chassis,ABS Pump Motor Circuit,The ABS pump motor circuit has a fault.,Failed ABS pump motor; blown fuse; failed ABS module,high,no
+C0121,Chassis,Valve Relay Circuit,The ABS valve relay circuit is faulty.,Failed relay; ABS module fault; wiring damage,high,no
+C0265,Chassis,EBCM Relay Circuit,The electronic brake control module relay has a fault.,Failed relay; corroded connector; failed brake control module,high,no
+U0100,Network,Lost Communication With ECM/PCM A,Modules cannot talk to the engine control module.,Failed engine control module; broken CAN bus wiring; poor ground; low battery voltage,high,no
+U0121,Network,Lost Communication With ABS Control Module,Modules cannot talk to the ABS control module.,Failed ABS module; CAN bus wiring fault; blown fuse,high,no
+U0140,Network,Lost Communication With Body Control Module,Modules cannot talk to the body control module.,Failed body control module; CAN wiring damage; water ingress in a connector,high,no
+U0155,Network,Lost Communication With Instrument Panel Cluster,Modules cannot talk to the dashboard cluster.,Failed instrument cluster; CAN bus fault; blown fuse,medium,yes-with-care
+P2096,Powertrain,Post Catalyst Fuel Trim System Too Lean (Bank 1),Fuel trim after the catalytic converter is running lean.,Exhaust leak after the converter; failed rear oxygen sensor; worn converter,medium,yes-with-care
+P2270,Powertrain,O2 Sensor Signal Stuck Lean (Bank 1 Sensor 2),The rear oxygen sensor signal is stuck on the lean side.,Failed rear oxygen sensor; exhaust leak; wiring fault,medium,yes-with-care
