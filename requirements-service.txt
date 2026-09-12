@@ -3,3 +3,7 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.13.5
+
+# Telemetry. Optional at runtime - services/orchestrator/telemetry.py no-ops if
+# APPLICATIONINSIGHTS_CONNECTION_STRING is unset, so tests and CI need no Azure.
+azure-monitor-opentelemetry==1.6.13

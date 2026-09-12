@@ -28,10 +28,12 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from azure.ai.agents import AgentsClient
 
+from . import telemetry
 from .runner import TurnResult, ask
 
 log = logging.getLogger(__name__)
@@ -199,14 +201,10 @@ def _context_for(specialist: str, message: str, decision: TriageDecision, so_far
             "not even 'you can book if you wish'. Explain the fault and stop."
         )
 
-    if specialist == "booking" and so_far:
-        diag = next((t for t in so_far if t.agent_name == "diagnostics" and t.answer), None)
-        if diag:
-            parts.append(
-                "A colleague has already looked at the technical side. "
-                "Do not repeat it - just handle the appointment.\n"
-                f"What they said:\n{diag.answer}"
-            )
+    # Booking used to be handed the diagnosis here. It was then told not to
+    # repeat it - so the only effect was to force booking to wait for
+    # diagnostics, costing 5.6s of wall clock. Removing it lets the two run
+    # concurrently. See docs/evaluation.md, the latency section.
 
     if specialist == "escalation" and so_far:
         prior = [t.answer for t in so_far if t.answer]
@@ -214,6 +212,115 @@ def _context_for(specialist: str, message: str, decision: TriageDecision, so_far
             parts.append("Already said to the customer:\n" + "\n---\n".join(prior))
 
     return "\n\n".join(parts)
+
+
+# Which specialists need another specialist's answer before they can start.
+# Everything not listed here is independent and can run concurrently.
+#
+# Escalation waits because its job is to summarise the conversation for a human,
+# and it writes a better summary knowing what the customer was already told.
+#
+# Booking used to wait for diagnostics, and that cost 5.6s of wall clock for no
+# benefit: it was handed the diagnosis and explicitly told not to repeat it.
+# Passing information to an agent so it can ignore it is not a dependency.
+NEEDS_BEFORE_IT_CAN_START = {
+    "escalation": {"diagnostics", "booking"},
+}
+
+
+def _plan(route: list[str]) -> list[list[str]]:
+    """Group a route into waves. Everything in a wave runs at the same time.
+
+    ['diagnostics']                          -> [['diagnostics']]
+    ['diagnostics', 'booking']               -> [['diagnostics', 'booking']]
+    ['diagnostics', 'escalation']            -> [['diagnostics'], ['escalation']]
+    ['diagnostics', 'booking', 'escalation'] -> [['diagnostics', 'booking'], ['escalation']]
+
+    Deliberately simple: a specialist waits only if something it depends on is
+    in this route. No topological sort, because the graph is four nodes and one
+    edge, and a reader should be able to check this function by eye.
+    """
+    waves: list[list[str]] = []
+    remaining = list(route)
+    done: set[str] = set()
+
+    while remaining:
+        ready = [s for s in remaining if not (NEEDS_BEFORE_IT_CAN_START.get(s, set()) & set(remaining) - done)]
+        if not ready:
+            # Cannot happen with the current table, but a cycle introduced later
+            # must degrade to sequential rather than hang.
+            log.warning("dependency cycle in route %s; running the rest in order", remaining)
+            ready = [remaining[0]]
+        waves.append(ready)
+        done.update(ready)
+        remaining = [s for s in remaining if s not in done]
+
+    return waves
+
+
+def _run_specialists(
+    client: AgentsClient,
+    ids: dict[str, str],
+    route: list[str],
+    message: str,
+    decision: TriageDecision,
+    timeout: float,
+) -> list[TurnResult]:
+    """Run the route, concurrently where the dependencies allow it.
+
+    Each agent turn is a sequence of HTTP calls to Azure with waiting in
+    between, so threads are the right tool - they are idle almost the whole
+    time. No shared mutable state: each thread gets its own thread id, its own
+    run, and returns its own TurnResult.
+    """
+    waves = _plan(route)
+    results: list[TurnResult] = []
+
+    for wave in waves:
+        if len(wave) == 1:
+            specialist = wave[0]
+            prompt = _context_for(specialist, message, decision, results)
+            turn = ask(client, ids[specialist], prompt, timeout=timeout, agent_name=specialist)
+            results.append(turn)
+            if not turn.ok:
+                log.warning("%s turn failed: %s", specialist, turn.error)
+            continue
+
+        log.info("running %s in parallel", wave)
+        # Build every prompt BEFORE starting any thread. _context_for reads the
+        # results list, and if one thread appended to it while another was
+        # reading, the prompts would depend on timing - the same request could
+        # produce different prompts on different runs.
+        prompts = {s: _context_for(s, message, decision, results) for s in wave}
+
+        with telemetry.span("specialists.parallel", agents=wave, count=len(wave)):
+            with ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="specialist") as pool:
+                futures = {
+                    pool.submit(
+                        ask, client, ids[s], prompts[s], timeout=timeout, agent_name=s
+                    ): s
+                    for s in wave
+                }
+                done_turns: dict[str, TurnResult] = {}
+                for fut, specialist in futures.items():
+                    try:
+                        done_turns[specialist] = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        # One specialist failing must not lose the others' work.
+                        log.exception("%s raised", specialist)
+                        failed = TurnResult(agent_name=specialist, status="failed")
+                        failed.error = f"{type(e).__name__}: {e}"
+                        done_turns[specialist] = failed
+
+        # Append in route order, not completion order. The reply must read the
+        # same way every time regardless of which agent happened to finish first.
+        for s in wave:
+            turn = done_turns[s]
+            results.append(turn)
+            if not turn.ok:
+                log.warning("%s turn failed: %s", s, turn.error)
+
+    return results
 
 
 def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
@@ -251,6 +358,32 @@ def handle(
     started = time.time()
     out = RouterResult()
 
+    with telemetry.span("chat.request", message_chars=len(message)) as req_span:
+        _handle_inner(client, message, timeout, agent_ids, out, started)
+        d = out.decision
+        telemetry.set(
+            req_span,
+            agents=out.agents_used,
+            searched=out.searched,
+            safety=bool(d and d.safety),
+            safety_source=d.safety_source if d else "none",
+            total_tokens=out.total_tokens,
+            duration_ms=out.duration_ms,
+            agent_count=len(out.turns),
+            failed_turns=sum(1 for t in out.turns if not t.ok),
+            error=out.error,
+        )
+    return out
+
+
+def _handle_inner(
+    client: AgentsClient,
+    message: str,
+    timeout: float,
+    agent_ids: dict[str, str] | None,
+    out: RouterResult,
+    started: float,
+) -> None:
     ids = agent_ids or _agent_ids(client)
 
     missing = [n for n in ("triage", "diagnostics", "booking", "escalation") if n not in ids]
@@ -258,7 +391,7 @@ def handle(
         out.error = f"agents not deployed: {', '.join(missing)}. Run agents/deploy_agents.py"
         out.reply = "The service is not fully set up. Please call the workshop directly."
         out.duration_ms = int((time.time() - started) * 1000)
-        return out
+        return
 
     # --- 1. triage ---
     triage_turn = ask(client, ids["triage"], message, timeout=timeout, agent_name="triage")
@@ -277,18 +410,25 @@ def handle(
         decision.intents, decision.safety, decision.safety_source, decision.route(), decision.reason,
     )
 
+    # A span rather than attributes on the request span, so routing decisions
+    # can be queried on their own - "how often does the keyword check catch
+    # something triage missed?" is a question worth being able to answer.
+    with telemetry.span("routing.decision") as rs:
+        telemetry.set(
+            rs,
+            intents=decision.intents,
+            route=decision.route(),
+            safety=decision.safety,
+            safety_source=decision.safety_source,
+            triage_parse_failed=decision.parse_failed,
+            reason=decision.reason[:200],
+            has_registration=bool(decision.registration),
+            has_date=bool(decision.date),
+        )
+
     # --- 2. specialists ---
-    for specialist in decision.route():
-        agent_id = ids.get(specialist)
-        if agent_id is None:
-            continue
-
-        prompt = _context_for(specialist, message, decision, out.turns[1:])
-        turn = ask(client, agent_id, prompt, timeout=timeout, agent_name=specialist)
-        out.turns.append(turn)
-
-        if not turn.ok:
-            log.warning("%s turn failed: %s", specialist, turn.error)
+    route = [s for s in decision.route() if s in ids]
+    out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout))
 
     # --- 3. compose ---
     out.reply = _compose(out.turns[1:], decision)
@@ -298,4 +438,3 @@ def handle(
         "handled in %dms: agents=%s tokens=%d",
         out.duration_ms, out.agents_used, out.total_tokens,
     )
-    return out

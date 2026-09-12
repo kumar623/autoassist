@@ -18,18 +18,29 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from azure.ai.agents import AgentsClient
 from azure.ai.agents.models import RequiredFunctionToolCall, SubmitToolOutputsAction, ToolOutput
 
-from . import tools
+from . import telemetry, tools
 
 log = logging.getLogger(__name__)
 
 TERMINAL = {"completed", "failed", "cancelled", "expired"}
-POLL_SECONDS = 0.8
+
+# Measured: at 0.8s we waited an average of 0.4s after a run had already
+# finished, several times per request. 0.25s costs a few more cheap GETs and
+# gives most of that back. Below ~0.15s the polling itself starts to matter.
+POLL_SECONDS = float(os.getenv("POLL_SECONDS", "0.25"))
+
+# Thread cleanup runs in the background. Deleting a thread is housekeeping - the
+# answer is already in hand - so blocking the customer's response on it buys
+# nothing. One worker is enough; deletes are ~200ms and never urgent.
+_CLEANUP = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thread-cleanup")
 
 
 @dataclass
@@ -86,6 +97,33 @@ def run_turn(
     started = time.time()
     out = TurnResult(thread_id=thread_id, agent_name=agent_name)
 
+    with telemetry.span("agent.turn", agent=agent_name, thread_id=thread_id) as turn_span:
+        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out, started)
+        telemetry.set(
+            turn_span,
+            run_id=out.run_id,
+            status=out.status,
+            searched=out.searched,
+            tool_count=len(out.tool_calls),
+            tools=[c.name for c in out.tool_calls],
+            prompt_tokens=out.prompt_tokens,
+            completion_tokens=out.completion_tokens,
+            duration_ms=out.duration_ms,
+            error=out.error,
+        )
+    return out
+
+
+def _run_turn_inner(
+    client: AgentsClient,
+    agent_id: str,
+    thread_id: str,
+    timeout: float,
+    max_tool_rounds: int,
+    agent_name: str,
+    out: TurnResult,
+    started: float,
+) -> None:
     run = client.runs.create(thread_id=thread_id, agent_id=agent_id)
     out.run_id = run.id
 
@@ -139,9 +177,21 @@ def run_turn(
 
                 name = call.function.name
                 raw_args = call.function.arguments
-                t0 = time.time()
-                result = tools.execute(name, raw_args)
-                ms = int((time.time() - t0) * 1000)
+
+                with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
+                    t0 = time.time()
+                    result = tools.execute(name, raw_args)
+                    ms = int((time.time() - t0) * 1000)
+                    telemetry.set(
+                        ts,
+                        duration_ms=ms,
+                        failed=result.startswith("ERROR:"),
+                        args=raw_args[:500] if raw_args else "",
+                        # Retrieval reports its own filtering in the first line
+                        # of its output; keep it so a bad search is visible in
+                        # the trace without opening the whole result.
+                        result_head=result[:200],
+                    )
 
                 try:
                     parsed = json.loads(raw_args) if raw_args else {}
@@ -176,7 +226,6 @@ def run_turn(
         out.answer = _latest_assistant_text(client, thread_id)
 
     out.duration_ms = int((time.time() - started) * 1000)
-    return out
 
 
 def _latest_assistant_text(client: AgentsClient, thread_id: str) -> str:
@@ -204,7 +253,12 @@ def ask(
         client.messages.create(thread_id=thread.id, role="user", content=question)
         return run_turn(client, agent_id, thread.id, timeout=timeout, agent_name=agent_name)
     finally:
-        try:
-            client.threads.delete(thread.id)
-        except Exception:  # noqa: BLE001
-            pass
+        _CLEANUP.submit(_delete_thread, client, thread.id)
+
+
+def _delete_thread(client: AgentsClient, thread_id: str) -> None:
+    """Best effort. A thread we failed to delete costs nothing but clutter."""
+    try:
+        client.threads.delete(thread_id)
+    except Exception as e:  # noqa: BLE001
+        log.debug("could not delete thread %s: %s", thread_id, e)

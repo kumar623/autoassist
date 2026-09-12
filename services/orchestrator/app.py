@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import router as routing
+from . import telemetry
 
 load_dotenv()
 
@@ -51,6 +52,11 @@ for noisy in (
     "azure.identity._credentials.managed_identity",
     "httpx",
     "openai",
+    # The exporter logs every batch it ships at INFO. Useful when telemetry
+    # itself is misbehaving, noise the rest of the time.
+    "azure.monitor.opentelemetry",
+    "azure.monitor.opentelemetry.exporter",
+    "opentelemetry",
 ):
     logging.getLogger(noisy).setLevel(_azure_level)
 
@@ -78,6 +84,8 @@ async def lifespan(app: FastAPI):
     DefaultAzureCredential fetches and caches a token; creating one per request
     means a token exchange on every call and a lot of wasted latency.
     """
+    STATE["telemetry"] = telemetry.setup()
+
     try:
         client = AgentsClient(
             endpoint=os.environ["PROJECT_ENDPOINT"],
@@ -132,7 +140,11 @@ def ready() -> dict:
     if missing:
         raise HTTPException(503, detail=f"agents not deployed: {', '.join(missing)}")
 
-    return {"status": "ready", "agents": sorted(STATE["agent_ids"])}
+    return {
+        "status": "ready",
+        "agents": sorted(STATE["agent_ids"]),
+        "telemetry": bool(STATE.get("telemetry")),
+    }
 
 
 @app.get("/metrics")
