@@ -12,7 +12,18 @@ __pycache__/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
+# .terraform.lock.hcl is deliberately NOT ignored. It pins the exact provider
+# versions and their checksums, so `terraform init` on another machine installs
+# byte-identical providers. Ignoring it is a common mistake - it is the
+# equivalent of a package-lock.json.
+# Saved plans. Binary, and they contain resource attributes - including values
+# Terraform read back from Azure. Never commit one.
+tfplan
+*.tfplan
+
+crash.log
+override.tf
+override.tf.json
 
 # generated data - regenerate with scripts/generate_bulletins.py
 data/synthetic_bulletins/*.pdf

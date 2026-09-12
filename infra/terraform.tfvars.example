@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+
+name        = "autoassist"
+environment = "dev"
+location    = "southindia"
+
+# "free" costs nothing and fits this project, but has no semantic reranker and
+# you may only have one free search service per subscription.
+search_sku = "free"
+
+# Filled in by the deploy pipeline. Leave empty for the first apply.
+container_image = ""
+
+tags = {
+  owner = "krishna"
+}
