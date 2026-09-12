@@ -1,0 +1,236 @@
+name: Deploy
+
+# Build an image, push it, deploy it, prove it works, and put the old one back
+# if it does not.
+#
+# Runs only after CI has passed on main. A green CI is the entry condition, not
+# a separate opinion: if the tests, the agent-definition check and the Docker
+# build did not pass, there is nothing here worth deploying.
+#
+# Also runnable by hand, which is how a rollback happens - see docs/deploy.md.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Deploy an image that already exists, by git SHA. Leave empty to build from main. This is how you roll back."
+        required: false
+        default: ""
+
+permissions:
+  # OIDC. GitHub mints a short-lived token that Azure trusts because of a
+  # federated credential naming this repo. No client secret is stored anywhere,
+  # so there is nothing to leak and nothing to rotate.
+  id-token: write
+  contents: read
+
+# Two deploys at once would race: both call `containerapp update`, and the app
+# ends up on whichever finished last rather than whichever started last.
+# cancel-in-progress is deliberately false - killing a deploy halfway is worse
+# than queueing behind it.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # workflow_run fires whether CI passed or failed, so the conclusion has to
+    # be checked here. Without this line, a red build deploys.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    # Add required reviewers to this environment in repo settings to turn every
+    # deploy into an approval gate. Nothing else in the file has to change.
+    environment: production
+
+    env:
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      CONTAINER_APP: ${{ vars.AZURE_CONTAINER_APP }}
+      REGISTRY: ${{ vars.AZURE_REGISTRY }}
+      IMAGE_NAME: autoassist
+
+    steps:
+      - name: Work out what we are deploying
+        id: target
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.image_tag }}" ]; then
+            # A rollback, or a redeploy of something already built.
+            echo "sha=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploying existing image ${{ inputs.image_tag }} - no build."
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            # The SHA CI actually tested. NOT github.sha, which on a workflow_run
+            # event points at the default branch tip - by then possibly a
+            # different, untested commit.
+            echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.target.outputs.build == 'true'
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Read this BEFORE changing anything. It is the only thing that makes a
+      # rollback possible, and asking Azure afterwards would return the image we
+      # just broke it with.
+      - name: Record what is running now
+        id: current
+        run: |
+          set -euo pipefail
+          IMAGE=$(az containerapp show \
+                    -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                    --query "properties.template.containers[0].image" -o tsv)
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Currently serving: $IMAGE"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.target.outputs.build == 'true'
+
+      # The OIDC login above already authenticated us; this just hands those
+      # credentials to Docker. No registry username or password exists.
+      - name: Log Docker in to the registry
+        if: steps.target.outputs.build == 'true'
+        run: az acr login --name "${REGISTRY%%.*}"
+
+      - name: Build and push
+        if: steps.target.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Two tags on one image. The SHA tag is the real one - immutable, and
+          # the thing a rollback names. "latest" is a convenience for humans and
+          # should never appear in a deploy command.
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.target.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          # Layer cache in GitHub's own store. The pip install layer is the slow
+          # one and changes only when requirements do.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy
+        id: deploy
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --image "$REGISTRY/$IMAGE_NAME:${{ steps.target.outputs.sha }}" \
+            --set-env-vars GIT_SHA="${{ steps.target.outputs.sha }}" \
+            --output none
+          echo "Asked Container Apps for a new revision."
+
+      # The deploy command returning 0 means Azure accepted the request, not
+      # that the new container starts, and not that it is serving. Those are
+      # different claims and only the last one matters.
+      #
+      # /health reports the SHA it was built from, so this waits for the NEW
+      # build specifically. Polling for HTTP 200 alone would pass instantly
+      # against the old revision still holding traffic.
+      - name: Smoke test - is the new build actually serving?
+        id: smoke
+        run: |
+          set -euo pipefail
+          FQDN=$(az containerapp show \
+                   -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+          URL="https://$FQDN"
+          WANT="${{ steps.target.outputs.sha }}"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Waiting for build $WANT at $URL"
+
+          # Up to 4 minutes. A cold start from zero replicas plus image pull is
+          # usually well under one.
+          for i in $(seq 1 48); do
+            GOT=$(curl -sf --max-time 10 "$URL/health" | jq -r '.build // empty' || true)
+            if [ "$GOT" = "$WANT" ]; then
+              echo "Serving $GOT after $((i * 5))s."
+              break
+            fi
+            if [ "$i" = "48" ]; then
+              echo "::error::Still serving '${GOT:-nothing}', expected '$WANT'."
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # Liveness only says the process is up. Readiness says it reached
+          # Azure and found all four agents - the check that catches a bad
+          # endpoint, a missing role assignment or an undeployed agent.
+          echo "Checking /ready"
+          if ! curl -sf --max-time 20 "$URL/ready"; then
+            echo
+            echo "::error::/ready failed - the process is up but cannot serve."
+            curl -s --max-time 20 "$URL/ready" || true
+            exit 1
+          fi
+          echo
+          echo "Ready."
+
+      # Only rolls back if we actually changed something. A failure in build or
+      # login leaves the running app untouched, and "rolling back" from there
+      # would be a deploy of its own.
+      - name: Roll back
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          PREVIOUS="${{ steps.current.outputs.image }}"
+          echo "::warning::Smoke test failed. Rolling back to $PREVIOUS"
+
+          az containerapp update \
+            -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+            --image "$PREVIOUS" \
+            --output none
+
+          FQDN=$(az containerapp show \
+                   -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+                   --query "properties.configuration.ingress.fqdn" -o tsv)
+
+          # Verify the rollback rather than assuming it. A rollback that quietly
+          # failed is worse than the original problem, because nobody is looking
+          # any more.
+          for i in $(seq 1 36); do
+            if curl -sf --max-time 10 "https://$FQDN/health" > /dev/null; then
+              echo "Rolled back and healthy after $((i * 5))s."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Rollback did not come back healthy. Manual intervention needed."
+          exit 1
+
+      - name: Log what happened
+        if: always()
+        run: |
+          {
+            echo "### Deploy"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${{ steps.target.outputs.sha }}\` |"
+            echo "| built | ${{ steps.target.outputs.build }} |"
+            echo "| previous image | \`${{ steps.current.outputs.image }}\` |"
+            echo "| deploy | ${{ steps.deploy.outcome }} |"
+            echo "| smoke test | ${{ steps.smoke.outcome }} |"
+            echo "| url | ${{ steps.smoke.outputs.url }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

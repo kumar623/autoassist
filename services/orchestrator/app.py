@@ -66,6 +66,11 @@ STATIC = pathlib.Path(__file__).resolve().parent / "static"
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "90"))
 MAX_MESSAGE_CHARS = 2000
 
+# Set by the deploy pipeline to the git SHA it built. Reported by /health so a
+# smoke test can prove the NEW revision is answering, not the old one still
+# holding traffic while the new one crash-loops quietly behind it.
+BUILD_SHA = os.getenv("GIT_SHA", "dev")
+
 STATE: dict = {"client": None, "agent_ids": {}, "started_at": time.time()}
 METRICS = {
     "requests": 0,
@@ -126,7 +131,11 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 def health() -> dict:
     """Liveness. Deliberately checks nothing external."""
-    return {"status": "ok", "uptime_s": int(time.time() - STATE["started_at"])}
+    return {
+        "status": "ok",
+        "build": BUILD_SHA,
+        "uptime_s": int(time.time() - STATE["started_at"]),
+    }
 
 
 @app.get("/ready")
