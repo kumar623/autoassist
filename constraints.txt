@@ -1,0 +1,33 @@
+# Pins for packages we do not ask for directly, but that pip has to work out.
+#
+# Why this exists: azure-monitor-opentelemetry requires opentelemetry-*~=0.57b0,
+# while much newer versions exist on PyPI. Pip therefore downloads metadata for
+# version after version, backwards, looking for a combination that satisfies
+# everything - the "pip is still looking at multiple versions" messages. That
+# search took 25 minutes of every build and produced the same answer each time.
+#
+# These are exactly the versions it landed on. Pinning them means pip stops
+# searching and just installs.
+#
+# To update: remove this file, run a build, and copy what pip chose back in.
+# Do not hand-edit a version here without checking azure-monitor-opentelemetry
+# still accepts it.
+
+opentelemetry-api==1.36.0
+opentelemetry-sdk==1.36.0
+opentelemetry-semantic-conventions==0.57b0
+opentelemetry-instrumentation==0.57b0
+opentelemetry-instrumentation-asgi==0.57b0
+opentelemetry-instrumentation-dbapi==0.57b0
+opentelemetry-instrumentation-django==0.57b0
+opentelemetry-instrumentation-fastapi==0.57b0
+opentelemetry-instrumentation-flask==0.57b0
+opentelemetry-instrumentation-psycopg2==0.57b0
+opentelemetry-instrumentation-requests==0.57b0
+opentelemetry-instrumentation-urllib==0.57b0
+opentelemetry-instrumentation-urllib3==0.57b0
+opentelemetry-instrumentation-wsgi==0.57b0
+opentelemetry-util-http==0.57b0
+opentelemetry-resource-detector-azure==0.1.5
+azure-monitor-opentelemetry-exporter==1.0.0b45
+wrapt==1.17.3

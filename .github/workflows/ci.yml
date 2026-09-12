@@ -109,6 +109,18 @@ jobs:
   evals:
     runs-on: ubuntu-latest
     needs: test
+
+    # Only this job talks to Azure, so only this job gets the permission.
+    # id-token: write lets GitHub mint the short-lived OIDC token that
+    # azure/login exchanges for Azure access. Without it the login step fails
+    # with "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL".
+    #
+    # Declaring permissions at all makes the default (read-only contents) apply
+    # to every other job, which is what we want: the test and docker jobs have
+    # no business holding a token that can reach Azure.
+    permissions:
+      id-token: write
+      contents: read
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v5

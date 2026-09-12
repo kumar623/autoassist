@@ -1,24 +1,25 @@
-.venv/
-venv/
-__pycache__/
+# The build context is uploaded before the build starts. Without this it was
+# 59 MB, almost all of it PDFs the image never copies.
+.git
+.github
+.venv
+venv
+__pycache__
 *.pyc
-.pytest_cache/
-.ruff_cache/
-
+.pytest_cache
+.ruff_cache
 .env
-.git/
-.github/
 
-data/synthetic_bulletins/
-data/bookings.json
-data/tickets.json
-
+data/
 docs/
-tests/
 evals/
-scripts/
+tests/
 infra/
-README.md
+scripts/
+*.md
 Makefile
 *.zip
 .DS_Store
+
+# Terraform downloads a few hundred MB of provider binaries here.
+**/.terraform/

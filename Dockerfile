@@ -8,8 +8,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-service.txt ./
+COPY requirements.txt requirements-service.txt constraints.txt ./
 RUN pip wheel --no-cache-dir --wheel-dir /wheels \
+      -c constraints.txt \
       -r requirements.txt -r requirements-service.txt
 
 
@@ -21,8 +22,9 @@ RUN useradd --create-home --uid 10001 app
 WORKDIR /app
 
 COPY --from=build /wheels /wheels
-COPY requirements.txt requirements-service.txt ./
+COPY requirements.txt requirements-service.txt constraints.txt ./
 RUN pip install --no-cache-dir --no-index --find-links=/wheels \
+      -c constraints.txt \
       -r requirements.txt -r requirements-service.txt \
  && rm -rf /wheels
 
