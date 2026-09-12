@@ -367,3 +367,26 @@ def test_escalation_sees_what_the_earlier_wave_said(monkeypatch):
     assert seen["diagnostics"] == []
     assert seen["booking"] == []
     assert seen["escalation"] == ["diagnostics", "booking"]
+
+
+# ---------------------------------------------------------------- run states
+
+
+def test_every_azure_terminal_state_is_recognised():
+    """Regression: 'incomplete' was missing, so a run that had already stopped
+    was polled until the 90s timeout and reported as a timeout. The eval suite
+    found it on its first run (injection-01).
+
+    If Azure adds a state, this list must grow or we hang again.
+    """
+    from services.orchestrator.runner import TERMINAL
+
+    for state in ("completed", "failed", "cancelled", "cancelling", "expired", "incomplete"):
+        assert state in TERMINAL, f"{state} would cause a poll-until-timeout hang"
+
+
+def test_in_progress_states_are_not_terminal():
+    from services.orchestrator.runner import TERMINAL
+
+    for state in ("queued", "in_progress", "requires_action"):
+        assert state not in TERMINAL

@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -76,7 +76,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       # Build only - no push yet. Catches a broken Dockerfile at PR time rather
       # than at deploy time.
@@ -101,3 +101,57 @@ jobs:
           docker logs ci
           docker rm -f ci
           exit 1
+
+  # Evals need Azure, so they cannot run on a pull request from a fork and they
+  # cost tokens. This job runs only on main, only when the credentials exist,
+  # and only the five-case smoke subset. The full set is run by hand before a
+  # release: `make evals`.
+  evals:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-service.txt
+
+      - name: Check whether Azure credentials are configured
+        id: creds
+        run: |
+          if [ -n "${{ secrets.AZURE_CLIENT_ID }}" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Azure credentials not configured - skipping evals."
+          fi
+
+      - name: Azure login
+        if: steps.creds.outputs.have == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run the smoke evals
+        if: steps.creds.outputs.have == 'true'
+        env:
+          PROJECT_ENDPOINT: ${{ vars.PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          SEARCH_ENDPOINT: ${{ vars.SEARCH_ENDPOINT }}
+          SEARCH_API_KEY: ${{ secrets.SEARCH_API_KEY }}
+        run: python3 evals/run_evals.py --smoke --save
+
+      - name: Keep the results
+        if: steps.creds.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/

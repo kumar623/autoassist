@@ -23,3 +23,6 @@ data/synthetic_bulletins/manifest.json
 # local booking/ticket store - week 3 moves this to Azure Table Storage
 data/bookings.json
 data/tickets.json
+
+# eval run output - keep the ones you want by committing them explicitly
+evals/results/

@@ -1,4 +1,6 @@
-.PHONY: setup data ingest reindex search agents ask lint test clean
+.PHONY: setup data ingest reindex search agents ask lint test clean \
+        agents-list triage book serve docker-build docker-run \
+        evals evals-smoke eval-one
 
 setup:
 	python -m venv .venv
@@ -59,3 +61,14 @@ docker-build:
 
 docker-run:
 	docker run --rm -p 8000:8000 --env-file .env autoassist:local
+
+# --- week 3: evals ---
+# Needs Azure. Not part of `make test`, which is offline and runs in CI.
+evals:
+	python3 evals/run_evals.py --save
+
+evals-smoke:
+	python3 evals/run_evals.py --smoke
+
+eval-one:
+	python3 evals/run_evals.py --only $(ID)

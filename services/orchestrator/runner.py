@@ -30,7 +30,18 @@ from . import telemetry, tools
 
 log = logging.getLogger(__name__)
 
-TERMINAL = {"completed", "failed", "cancelled", "expired"}
+# Every state a run can stop in. Missing one means polling a finished run until
+# the timeout - which is what happened with "incomplete", a status Azure returns
+# when a run stops early (max tokens, content filter, or a truncated response).
+# The run was over in seconds; we waited 90 and reported a timeout.
+TERMINAL = {
+    "completed",
+    "failed",
+    "cancelled",
+    "cancelling",
+    "expired",
+    "incomplete",
+}
 
 # Measured: at 0.8s we waited an average of 0.4s after a run had already
 # finished, several times per request. 0.25s costs a few more cheap GETs and
@@ -150,6 +161,14 @@ def _run_turn_inner(
             out.status = status
             if status == "failed":
                 out.error = str(getattr(run, "last_error", "run failed"))
+            elif status == "incomplete":
+                # The run stopped early. Azure says why in incomplete_details -
+                # usually max tokens or a content filter. Worth surfacing: the
+                # answer may be truncated mid-sentence.
+                why = getattr(run, "incomplete_details", None)
+                out.error = f"run ended early: {why or 'no reason given'}"
+            elif status in ("cancelled", "cancelling", "expired"):
+                out.error = f"run {status}"
             break
 
         if status == "requires_action":
