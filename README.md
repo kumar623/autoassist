@@ -16,11 +16,12 @@ I can help you book a slot for Saturday 19 September. Here are some available
 times: 09:00, 10:30, 12:00, or 14:00. Could you please provide your vehicle
 registration number?
 
-triage → diagnostics → booking · searched documents · 7,350 tokens · 20.4s
+triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9s
 ```
 
-> Week 2 of 3. Working: retrieval, four agents, routing, HTTP API, chat page,
-> container. Not yet: CI/CD, App Insights, Terraform. See [Status](#status).
+> Week 3 of 3. Working: retrieval, four agents, parallel routing, HTTP API,
+> chat page, container, CI, App Insights tracing. Not yet: deployment pipeline,
+> Terraform, automated eval scoring. See [Status](#status).
 
 ---
 
@@ -151,7 +152,7 @@ python3 agents/deploy_agents.py
 
 ```bash
 make serve                  # http://localhost:8000
-make test                   # 50 tests, no Azure needed
+make test                   # 79 tests, no Azure needed
 
 python3 agents/ask.py "what does P0420 mean"
 python3 agents/ask.py "my brakes feel spongy"
@@ -205,19 +206,22 @@ used or redistributed. Every generated PDF says so on page 1.
 ## Status
 
 **Working:** ingestion and hybrid retrieval · four agents deployed from version
-controlled JSON · code-based routing with an independent safety check · function
-tools executed in-process · run loop with timeouts and per-call logging ·
-FastAPI with liveness and readiness · chat page showing the trace · Dockerfile ·
-50 offline tests.
+controlled JSON · code-based routing with an independent safety check ·
+independent specialists run in parallel · function tools executed in-process ·
+run loop with timeouts and per-call logging · OpenTelemetry tracing into
+Application Insights · FastAPI with liveness and readiness · chat page showing
+the trace · Dockerfile · GitHub Actions CI · 79 offline tests.
 
-**Not done yet:** GitHub Actions pipelines · App Insights (traces are local
-only) · Terraform (resources were created by hand) · automated eval scoring.
+**Not done yet:** deployment pipeline (CI runs tests and builds the image; it
+does not deploy) · Terraform (resources were created by hand) · automated eval
+scoring.
 
 **Known limitations:**
 
-- **~21s per multi-agent reply.** Three sequential agent calls. Fixes are
-  running independent specialists in parallel and streaming the first answer.
-  Measured, not yet optimised.
+- **~12s per three-agent reply** (down from 20s). Independent specialists now
+  run in parallel; see `docs/evaluation.md`. Triage is the largest remaining
+  single cost at 2.8s for ~50 tokens of JSON. Streaming the first answer while
+  the second works would cut perceived latency further.
 - **Bookings are a JSON file.** The interface is designed so Azure Table Storage
   or a real calendar drops in without touching the agents.
 - **No reranker** on the Free search tier.

@@ -276,3 +276,119 @@ problem from week 1 fixed.
 - Every tool output needs the same audit: does it claim anything it cannot
   know? `get_available_slots` and `book_service_slot` have not been reviewed
   this way yet.
+
+---
+
+# Week 3 — latency
+
+## The measurement that started it
+
+App Insights spans, three-agent request ("P0420 is showing, can I book in for
+Saturday?"), before any optimisation:
+
+| Span | Duration |
+|---|---|
+| `chat.request` | **20,106 ms** |
+| `agent.turn` triage | 3,717 ms |
+| `agent.turn` diagnostics | 7,588 ms |
+| `tool.call` search_service_docs | 1,053 ms |
+| `agent.turn` booking | 5,597 ms |
+| `tool.call` get_available_slots | **2 ms** |
+| unaccounted | ~3,200 ms |
+
+Three things fell out of that table immediately:
+
+**Triage cost 3.7s to produce 52 tokens** - 18% of the request, for
+classification.
+
+**The tools were not the problem.** Retrieval about 1s; the booking lookup 2
+milliseconds. All the time was in the models and in our own plumbing.
+
+**~1.1s per turn was unaccounted for** - thread creation, thread deletion, and
+polling.
+
+None of this was guessable. The instrumentation paid for itself on its first
+day.
+
+## What changed
+
+### 1. Independent specialists now run in parallel
+
+Booking was waiting for diagnostics because the router passed it the diagnosis.
+Booking's prompt then told it not to repeat that diagnosis.
+
+**Passing information to an agent so it can ignore it is not a dependency.** It
+cost 5.6s of wall clock and bought nothing. Removed.
+
+`NEEDS_BEFORE_IT_CAN_START` now names the one real dependency: escalation waits,
+because it summarises the conversation for a human and writes a better summary
+knowing what was already said. `_plan()` groups the route into waves; everything
+in a wave runs at once.
+
+Deliberately not a topological sort. The graph is four nodes and one edge, and
+a reader should be able to verify the function by eye.
+
+### 2. Faster polling
+
+`POLL_SECONDS` 0.8 → 0.25. At 0.8 we waited an average of 0.4s after a run had
+already finished, several times per request. Costs a few more cheap GETs.
+
+### 3. Thread deletion moved to the background
+
+Every turn created and deleted a thread. The delete blocked the customer's
+response for housekeeping that had no bearing on the answer. Now submitted to a
+small executor and forgotten.
+
+## Result
+
+| | Before | After |
+|---|---|---|
+| Three agents | 20,106 ms | **11,919 ms** |
+| triage | 3,717 ms | 2,800 ms |
+| diagnostics | 7,588 ms | 7,300 ms |
+| booking | 5,597 ms | 5,200 ms, fully hidden |
+
+41% faster. The log shows the two runs queued 33ms apart and booking finishing
+2.1s before diagnostics, entirely inside its window.
+
+## Concurrency bugs this could have had
+
+Written down because they are the interesting part, and each has a test.
+
+**Prompts depending on thread timing.** `_context_for` reads the results list.
+Called inside the threads, one could append while another read, and the same
+request would produce different prompts on different runs - unreproducible by
+construction. All prompts for a wave are now built before any thread starts.
+`test_prompts_are_built_before_any_thread_starts`.
+
+**Replies in completion order.** Booking usually finishes first because its tool
+takes 2ms. The reply must always read diagnostics first. Results are appended in
+route order, never completion order.
+`test_results_come_back_in_route_order_not_finish_order`.
+
+**One failure losing everything.** An exception in one thread must not discard
+the other's answer. Each future is resolved individually and a failure becomes a
+failed turn. `test_one_specialist_failing_does_not_lose_the_other`.
+
+**A future dependency cycle hanging the request.** If someone later adds a
+mutual dependency, `_plan` logs a warning and degrades to sequential rather than
+looping forever. `test_a_dependency_cycle_degrades_to_sequential`.
+
+**Losing the safety guarantee.** Parallelism must not change the rule that a
+safety issue reaches escalation.
+`test_safety_route_still_reaches_escalation_after_planning`.
+
+The concurrency test that matters measures wall clock: two 0.4s agents must
+finish in under 0.7s. Sequential execution cannot pass it.
+
+## Still open
+
+- **Triage is now the largest single cost** at 2.8s for ~50 tokens of JSON.
+  Options, in order of appeal: a smaller model for classification; a
+  deterministic fast path for unambiguous messages (a fault code and no booking
+  words is provably diagnostics-only); or speculative execution - start
+  diagnostics immediately and discard if triage routes elsewhere, trading tokens
+  for latency.
+- **Streaming.** The first agent's answer could reach the customer while the
+  second is still working. Perceived latency would drop further than measured
+  latency.
