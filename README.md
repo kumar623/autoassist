@@ -20,8 +20,8 @@ triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9
 ```
 
 > Week 3 of 3. Working: retrieval, four agents, parallel routing, HTTP API,
-> chat page, container, CI, App Insights tracing. Not yet: deployment pipeline,
-> Terraform, automated eval scoring. See [Status](#status).
+> chat page, container, CI, App Insights tracing, automated evals (16/16).
+> Not yet: deployment pipeline, Terraform. See [Status](#status).
 
 ---
 
@@ -94,7 +94,7 @@ finding 5.)
 ## What this is actually for
 
 The system works, but the interesting part is
-**[docs/evaluation.md](docs/evaluation.md)** — seven documented failures, what
+**[docs/evaluation.md](docs/evaluation.md)** — ten documented failures, what
 caused each, and what fixed it. Short version:
 
 1. **The agent skipped retrieval on safety questions.** A rule that only forbids
@@ -112,6 +112,14 @@ caused each, and what fixed it. Short version:
 7. **A tool's output is a second prompt, and it wins.** Saying "5 relevant
    documents" when the tool only knew "5 closest text matches" overrode the
    instruction to check relevance. So did the word "complete".
+8. **A missing run state caused 90-second hangs.** Azure returns `incomplete`;
+   the poll loop did not know it and waited out the timeout on runs that had
+   already finished. Found by an eval case about prompt injection.
+9. **"I can smell petrol" did not trigger the fuel warning.** The prompt said
+   "fuel leaks". Customers do not say "leak".
+10. **The scorer was wrong more often than the system.** Six of the first ten
+    eval failures were bugs in the eval, including checking citations against
+    files on disk when the search index is the real ground truth.
 
 Every one of those produced a plausible-looking answer. None of them looked
 broken. They were found by checking whether the tool was actually called, what
@@ -152,7 +160,8 @@ python3 agents/deploy_agents.py
 
 ```bash
 make serve                  # http://localhost:8000
-make test                   # 79 tests, no Azure needed
+make test                   # 112 tests, no Azure needed
+make evals                  # 16 golden-set cases against the real agents
 
 python3 agents/ask.py "what does P0420 mean"
 python3 agents/ask.py "my brakes feel spongy"
@@ -210,11 +219,12 @@ controlled JSON · code-based routing with an independent safety check ·
 independent specialists run in parallel · function tools executed in-process ·
 run loop with timeouts and per-call logging · OpenTelemetry tracing into
 Application Insights · FastAPI with liveness and readiness · chat page showing
-the trace · Dockerfile · GitHub Actions CI · 79 offline tests.
+the trace · Dockerfile · GitHub Actions CI · 112 offline tests · automated
+eval suite scoring 16 cases on trace facts, 16/16 passing.
 
-**Not done yet:** deployment pipeline (CI runs tests and builds the image; it
-does not deploy) · Terraform (resources were created by hand) · automated eval
-scoring.
+**Not done yet:** deployment pipeline (CI runs tests, builds the image and runs
+the smoke evals; it does not deploy) · Terraform (resources were created by
+hand) · model-graded evaluation (the scorer checks compliance, not quality).
 
 **Known limitations:**
 
