@@ -77,11 +77,18 @@ able to see that the problem is understood, not solved by accident.
 Worth being exact, because "infrastructure as code" is usually claimed as
 complete and rarely is.
 
-1. **The Foundry project and its AI Search connection.** `azurerm_cognitive_account` (kind `AIServices`)
-   creates the account and the model deployments. The *project* inside it, and
-   the connection from that project to the search service, are Foundry concepts
-   the azurerm provider does not model at this version. Both are portal steps,
-   listed in `terraform output next_steps`. This is the one genuine gap.
+1. **The Foundry project and its AI Search connection.** `azurerm_cognitive_account`
+   (kind `AIServices`) creates the account and the model deployments. The
+   *project* inside it, and that project's connection to the search service,
+   are still portal steps, listed in `terraform output next_steps`.
+
+   To be precise, because "the provider does not support it" is too broad:
+   `azurerm_ai_foundry_project` exists, but it models the older **hub-based**
+   Foundry project - a Machine Learning workspace under a hub. This project is
+   the newer **account-based** kind, which lives inside the Cognitive Services
+   account itself. Provider support for that shape was still landing when this
+   was written. Worth re-checking on a provider upgrade; it is the one gap that
+   is likely to close on its own.
 
 2. **Data.** Terraform creates an empty search service. The index, its schema,
    its vectorizer and its 370 chunks come from `scripts/ingest.py`. That is

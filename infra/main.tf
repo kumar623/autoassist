@@ -253,8 +253,25 @@ resource "azurerm_role_assignment" "app_pulls_images" {
 
 resource "azurerm_role_assignment" "app_uses_ai" {
   scope                = azurerm_cognitive_account.main.id
-  role_definition_name = "Cognitive Services User"
+  role_definition_name = "Foundry User"
   principal_id         = azurerm_user_assigned_identity.app.principal_id
+
+  # Two things learned the hard way, both worth keeping:
+  #
+  # 1. This was "Cognitive Services User", which does not work. The app
+  #    authenticated, reached the project, and got back an EMPTY LIST of agents
+  #    - no error, nothing in the logs. That role covers model inference;
+  #    listing and running agents is a separate data-plane permission.
+  #
+  # 2. The role is called "Foundry User". Microsoft renamed it from
+  #    "Azure AI User", and the old name no longer resolves at all - verified
+  #    with `az role definition list`. Docs still carry the old name in places.
+  #
+  # Looking this up with a `data "azurerm_role_definition"` block was tried and
+  # reverted: searching by name has no scope to narrow it, so the provider
+  # enumerates every role definition in the subscription. It added three
+  # minutes to every plan. A plan slow enough to skip is worse than a
+  # hardcoded string.
 }
 
 resource "azurerm_role_assignment" "app_reads_search" {
@@ -278,6 +295,18 @@ resource "azurerm_container_app" "orchestrator" {
   registry {
     server   = azurerm_container_registry.main.login_server
     identity = azurerm_user_assigned_identity.app.id
+  }
+
+  # Secrets are referenced by name below, so they do not appear in
+  # `az containerapp show` output or in the portal's environment variable list.
+  secret {
+    name  = "openai-key"
+    value = azurerm_cognitive_account.main.primary_access_key
+  }
+
+  secret {
+    name  = "search-key"
+    value = azurerm_search_service.main.primary_key
   }
 
   template {
@@ -325,6 +354,33 @@ resource "azurerm_container_app" "orchestrator" {
         value = azurerm_cognitive_deployment.embedding.name
       }
 
+      # Retrieval runs in this service as a function tool and uses keys: it
+      # embeds the query and queries the index directly. Managed identity
+      # covers the agents; these cover the search path.
+      env {
+        name        = "AZURE_OPENAI_API_KEY"
+        secret_name = "openai-key"
+      }
+      env {
+        name  = "AZURE_OPENAI_API_VERSION"
+        value = "2025-04-01-preview"
+      }
+      env {
+        name        = "SEARCH_API_KEY"
+        secret_name = "search-key"
+      }
+      env {
+        name  = "SEARCH_INDEX_NAME"
+        value = "service-docs"
+      }
+
+      # Overwritten by the deploy pipeline with the commit it built. /health
+      # reports it so the smoke test can prove the NEW build is serving.
+      env {
+        name  = "GIT_SHA"
+        value = "bootstrap"
+      }
+
       # Liveness, not readiness. A readiness failure means "do not send me
       # traffic"; restarting on it would turn a brief Azure blip into a
       # restart loop across every replica.
@@ -366,6 +422,16 @@ resource "azurerm_container_app" "orchestrator" {
       # The deploy pipeline updates the image. Terraform should not fight it and
       # roll back to whatever was current when infrastructure last ran.
       template[0].container[0].image,
+
+      # And it sets GIT_SHA on every deploy. Terraform cannot own one variable
+      # in a list, so ignoring GIT_SHA means ignoring all of them.
+      #
+      # The cost is real and worth stating: after the first apply, Terraform no
+      # longer manages this app's configuration. Changing an endpoint means
+      # changing it where the pipeline can see it, not here. The alternative -
+      # letting Terraform win - would strip GIT_SHA on every infrastructure
+      # change and silently break the smoke test that depends on it.
+      template[0].container[0].env,
     ]
   }
 }
