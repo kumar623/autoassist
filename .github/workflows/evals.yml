@@ -1,0 +1,84 @@
+name: Evals
+
+# Agent behaviour, not code.
+#
+# These run real questions against the deployed agents and score what comes
+# back. That is a test of the PROMPTS, which live in Foundry - not of anything
+# in this repository. A Dockerfile change cannot alter how the diagnostics
+# agent answers, so gating a code deploy on this was gating on the wrong thing:
+# it spent tokens on every push and let one flaky answer block an unrelated fix.
+#
+# So: CI gates code, this gates agents. Run it by hand after changing a prompt
+# or deploying agents, and weekly to catch drift - a model version changing
+# under us, a document falling out of the index, an Azure content filter
+# behaving differently than it did last month.
+#
+# The full set is still `make evals` locally. This is the five-case smoke
+# subset.
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 06:00 UTC Monday - 11:30 Vizag time. Weekly is enough to catch drift
+    # without paying for it daily.
+    - cron: "0 6 * * 1"
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+
+    # id-token: write lets GitHub mint the short-lived OIDC token that
+    # azure/login exchanges for Azure access. Without it the login step fails
+    # with "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL".
+    permissions:
+      id-token: write
+      contents: read
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-service.txt
+
+      - name: Check whether Azure credentials are configured
+        id: creds
+        run: |
+          if [ -n "${{ secrets.AZURE_CLIENT_ID }}" ] \
+             && [ -n "${{ vars.PROJECT_ENDPOINT }}" ] \
+             && [ -n "${{ vars.SEARCH_ENDPOINT }}" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Azure credentials or endpoint variables not configured - skipping evals. Needs secrets AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID/AZURE_OPENAI_API_KEY/SEARCH_API_KEY and variables PROJECT_ENDPOINT/AZURE_OPENAI_ENDPOINT/SEARCH_ENDPOINT."
+          fi
+
+      - name: Azure login
+        if: steps.creds.outputs.have == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run the smoke evals
+        if: steps.creds.outputs.have == 'true'
+        env:
+          PROJECT_ENDPOINT: ${{ vars.PROJECT_ENDPOINT }}
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          SEARCH_ENDPOINT: ${{ vars.SEARCH_ENDPOINT }}
+          SEARCH_API_KEY: ${{ secrets.SEARCH_API_KEY }}
+        run: python3 evals/run_evals.py --smoke --save
+
+      - name: Keep the results
+        if: steps.creds.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/
