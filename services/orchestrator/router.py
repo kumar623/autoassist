@@ -30,6 +30,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date
 
 from azure.ai.agents import AgentsClient
 
@@ -56,7 +57,8 @@ MAX_HISTORY_CHARS = 600
 SMALL_TALK = re.compile(
     r"^\s*(hi|hello|hey|hiya|good (morning|afternoon|evening)|"
     r"thanks|thank you|thanks a lot|thank you so much|thx|cheers|bye|goodbye)"
-    r"(\s+(there|again|very much))?[\s!.,]*$",
+    r"(\s+(there|again|very much))?"
+    r"([\s,!.]+how are (you|u)( doing)?( today)?)?[\s!.,?]*$",
     re.IGNORECASE,
 )
 GREETING_REPLY = (
@@ -65,6 +67,31 @@ GREETING_REPLY = (
 )
 THANKS_REPLY = "You're welcome. Is there anything else I can help with?"
 BYE_REPLY = "Goodbye. Get in touch any time."
+
+# What booking is told when it picks up a conversation part-way. Each rule is
+# here because a local replay of a real conversation broke without it:
+#
+#   - "1 pm", when 1 pm was not free, was booked as 12:00 - a time the customer
+#     never chose, and not even one of the times last offered. That came from an
+#     earlier, looser version of this text: "if they chose one, book it".
+#   - Slot ids appear nowhere in the conversation, only times in words. The model
+#     invented one ('slot_10:30_2020-09-21') and took four tool calls to recover.
+#   - After a confirmed booking, the booked slot is missing from the free list;
+#     the model read that as "not free" and booked the customer a second time.
+BOOKING_CONTINUATION = (
+    "\n\nBook only the exact time the customer chose. If the time they name is not "
+    "free, say so and offer the nearest free times, then wait for them to pick one. "
+    "Never book a different time from the one they asked for, however close.\n"
+    "Slot ids are not in the conversation: call get_available_slots for that day "
+    "first and book with the slot_id it returns.\n"
+    "If the conversation already shows a booking confirmed with a reference, it "
+    "stands: its slot is missing from the free list because it is theirs. Do not "
+    "make a second booking unless they clearly ask for another appointment.\n"
+    "To move a booking, use move_service_booking with its reference and the new "
+    "slot_id. Asking to move it is their confirmation. Never cancel a booking in "
+    "order to move it: if the new time is not free, the move changes nothing and the "
+    "booking stays where it was."
+)
 
 # Belt and braces. Triage is a model and models miss things, so we re-check the
 # message ourselves. Either flag firing is enough to escalate - we would rather
@@ -78,6 +105,14 @@ SAFETY_WORDS = re.compile(
 )
 
 
+# The same belt and braces for bookings. On the live app "book at 2 pm, viper
+# blades" was routed to diagnostics alone, which then told the customer "you can
+# book the replacement for 2 pm" - nothing was booked. If the customer says
+# book, booking runs. The cost of a false positive ("my service book says...")
+# is a list of free slots.
+BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule)\b", re.IGNORECASE)
+
+
 @dataclass
 class TriageDecision:
     intents: list[str] = field(default_factory=lambda: ["other"])
@@ -88,6 +123,7 @@ class TriageDecision:
     raw: str = ""
     parse_failed: bool = False
     safety_source: str = "none"  # "triage", "keyword", "both", "none"
+    booking_added_by_keyword: bool = False
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
@@ -143,6 +179,17 @@ class RouterResult:
 
 def parse_triage(text: str, message: str) -> TriageDecision:
     """Turn the triage agent's JSON into a decision, and never trust it blindly."""
+    decision = _parse_triage(text, message)
+
+    if BOOKING_WORDS.search(message) and "booking" not in decision.intents:
+        log.warning("triage missed a booking request the keyword check caught: %r", message[:120])
+        decision.intents = [i for i in decision.intents if i != "other"] + ["booking"]
+        decision.booking_added_by_keyword = True
+
+    return decision
+
+
+def _parse_triage(text: str, message: str) -> TriageDecision:
     keyword_safety = bool(SAFETY_WORDS.search(message))
 
     cleaned = text.strip()
@@ -264,17 +311,8 @@ def _context_for(
         if recent:
             parts.append(
                 "Conversation so far, oldest first:\n" + "\n".join(recent) + "\n\n"
-                "Carry on from it. Do not ask again for anything already given. If "
-                "you offered times and they chose one, book it."
-                + (
-                    # The conversation holds times in words, never slot ids. Without
-                    # this the model invented one ('slot_10:30_2020-09-21'), was
-                    # refused, and took four tool calls and 16s to recover.
-                    " Slot ids are not in the conversation: call get_available_slots "
-                    "for that day first and book with the slot_id it returns."
-                    if specialist == "booking"
-                    else ""
-                )
+                "Carry on from it. Do not ask again for anything already given."
+                + (BOOKING_CONTINUATION if specialist == "booking" else "")
             )
     elif specialist == "diagnostics":
         earlier = _recent(history, roles=("customer",))
@@ -286,6 +324,12 @@ def _context_for(
             )
 
     parts.append(f"Customer message: {message}")
+
+    # Booking turns "Monday 21 September" into YYYY-MM-DD itself, and without a
+    # date it guessed the year: 2020, from its training. The slot lookup then
+    # said the day was in the past. Same clock as booking.py's slot calendar.
+    if specialist == "booking":
+        parts.append(f"Today is {date.today().strftime('%A %d %B %Y')} ({date.today().isoformat()}).")
 
     if decision.registration:
         parts.append(f"Vehicle registration: {decision.registration}")
@@ -546,6 +590,7 @@ def _handle_inner(
             safety=decision.safety,
             safety_source=decision.safety_source,
             triage_parse_failed=decision.parse_failed,
+            booking_added_by_keyword=decision.booking_added_by_keyword,
             reason=decision.reason[:200],
             has_registration=bool(decision.registration),
             has_date=bool(decision.date),

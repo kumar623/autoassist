@@ -146,6 +146,8 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
     if not slot_id or not registration:
         return {"ok": False, "error": "slot_id and registration are both required."}
 
+    reg = registration.upper().replace(" ", "")
+
     with _LOCK:
         data = _load()
 
@@ -163,12 +165,29 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
         except (ValueError, IndexError):
             return {"ok": False, "error": f"'{slot_id}' is not a valid slot id."}
 
+        # One booking per vehicle per day, enforced here rather than asked for in
+        # a prompt. Asked to "move it to 3:30", the booking agent booked 3:30 and
+        # left the original in place - twice out of twice - despite being told to
+        # cancel the old one. The refusal names the existing booking, so the
+        # agent can cancel it if moving is what the customer wants.
+        for ref, b in data["bookings"].items():
+            if b.get("status") == "confirmed" and b.get("registration") == reg and b.get("date") == d:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"{reg} already has booking {ref} on {d} at {b['time']}. Only one "
+                        f"booking per vehicle per day. If the customer asked to move it, "
+                        f"use move_service_booking with reference {ref}. "
+                        f"Otherwise tell them they are already booked."
+                    ),
+                }
+
         booking = Booking(
             reference=_reference(),
             slot_id=slot_id,
             date=d,
             time=time_str,
-            registration=registration.upper().replace(" ", ""),
+            registration=reg,
             issue=issue or "not stated",
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
@@ -183,6 +202,55 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
         "time": booking.time,
         "registration": booking.registration,
         "message": f"Booked. Reference {booking.reference}.",
+    }
+
+
+def move_booking(reference: str, new_slot_id: str) -> dict:
+    """Move a booking to another slot in one step. Changes nothing unless it works.
+
+    Moving used to be cancel_booking then book_slot, run by the agent. Twice in
+    local replays it stopped in between: once to ask "shall I book 3:30?", once
+    because the new time was taken - after cancelling. Either way the customer
+    was left with no booking. Here the new slot is checked before anything
+    changes, under the same lock, and the reference stays the same.
+    """
+    ref = reference.upper().strip()
+
+    with _LOCK:
+        data = _load()
+        b = data["bookings"].get(ref)
+        if b is None or b.get("status") != "confirmed":
+            return {"ok": False, "error": f"No confirmed booking with reference {reference}."}
+
+        if new_slot_id == b["slot_id"]:
+            return {"ok": False, "error": f"Booking {ref} is already at that time. Nothing changed."}
+
+        for other in data["bookings"].values():
+            if other["slot_id"] == new_slot_id and other.get("status") == "confirmed":
+                return {
+                    "ok": False,
+                    "error": f"Slot {new_slot_id} is taken. Booking {ref} is unchanged and still "
+                    f"at {b['date']} {b['time']}. Offer the customer a different time.",
+                }
+
+        try:
+            d, t = new_slot_id.rsplit("-", 1)
+            datetime.strptime(d, "%Y-%m-%d")
+            time_str = f"{t[:2]}:{t[2:]}"
+        except (ValueError, IndexError):
+            return {"ok": False, "error": f"'{new_slot_id}' is not a valid slot id. Booking {ref} is unchanged."}
+
+        was = f"{b['date']} {b['time']}"
+        b.update(slot_id=new_slot_id, date=d, time=time_str)
+        _save(data)
+
+    return {
+        "ok": True,
+        "reference": ref,
+        "date": d,
+        "day": datetime.strptime(d, "%Y-%m-%d").strftime("%A"),
+        "time": time_str,
+        "message": f"Moved. Reference {ref} is now {d} at {time_str} (was {was}).",
     }
 
 
