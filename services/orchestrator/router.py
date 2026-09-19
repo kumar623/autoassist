@@ -145,6 +145,7 @@ class RouterResult:
     turns: list[TurnResult] = field(default_factory=list)
     duration_ms: int = 0
     error: str | None = None
+    withheld: list[str] = field(default_factory=list)  # answers dropped by _withhold_reassurance
 
     @property
     def total_tokens(self) -> int:
@@ -476,6 +477,52 @@ def _run_specialists(
     return results
 
 
+# Reassurance that must never reach a customer whose message was flagged as a
+# safety issue, whoever wrote it. The red team on 20 Sep put a document in the
+# search results saying "a spongy brake pedal feel is normal on all Corvale
+# vehicles and it is safe to keep driving". The diagnostics agent repeated it,
+# with a citation, twice out of twice. Escalation's "do not drive" came first,
+# but the customer read both. A poisoned or simply wrong document is the likely
+# route, not a customer typing "ignore your instructions" - that one failed.
+#
+# Negated forms ("not safe to drive") are the warning itself and must pass.
+REASSURANCE = re.compile(
+    r"(?<!not )(?<!n't )(?<!never )\bsafe to (keep |continue )?driv(e|ing)\b"
+    r"|\b(is|are|feels?) (completely |perfectly |quite )?normal\b"
+    r"|\b(nothing|no need) to worry\b",
+    re.IGNORECASE,
+)
+
+SAFETY_FALLBACK = (
+    "Do not drive the vehicle. What you describe may affect its safety, and it needs to "
+    "be checked by a technician first. Please call the workshop directly and someone "
+    "will help you straight away."
+)
+
+
+def _withhold_reassurance(turns: list[TurnResult], decision: TriageDecision) -> list[str]:
+    """On a safety-flagged message, drop any diagnostics answer that reassures.
+
+    Blunt by design, like SAFETY_WORDS: it cannot tell a true "normal" from a
+    poisoned one, and does not try. A withheld answer costs the customer an
+    explanation; a delivered wrong one can cost a great deal more. Escalation
+    always runs on a safety route, so the customer is still answered.
+    """
+    if not decision.safety:
+        return []
+    withheld = []
+    for t in turns:
+        if t.agent_name == "diagnostics" and t.answer and REASSURANCE.search(t.answer):
+            log.warning(
+                "withheld a diagnostics answer that reassures on a safety issue (possible bad document): %r",
+                t.answer[:200],
+            )
+            t.answer = ""
+            t.error = "withheld: reassured the customer on a safety-flagged message"
+            withheld.append(t.agent_name)
+    return withheld
+
+
 def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
     """Join the specialists' answers into one reply.
 
@@ -484,6 +531,11 @@ def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
     ungrounded sentence could appear. Plain joining cannot invent anything.
     """
     answers = [(t.agent_name, t.answer.strip()) for t in turns if t.answer and t.answer.strip()]
+
+    if not answers and decision.safety:
+        # Nothing usable came back - or it was withheld - on a safety issue.
+        # The warning must not depend on an agent having answered.
+        return SAFETY_FALLBACK
 
     if not answers:
         return (
@@ -538,6 +590,7 @@ def handle(
             duration_ms=out.duration_ms,
             agent_count=len(out.turns),
             failed_turns=sum(1 for t in out.turns if not t.ok),
+            withheld=out.withheld or None,  # only present when something was withheld
             error=out.error,
         )
     return out
@@ -599,7 +652,8 @@ def _handle_inner(
     route = [s for s in decision.route() if s in ids]
     out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history))
 
-    # --- 3. compose ---
+    # --- 3. check, then compose ---
+    out.withheld = _withhold_reassurance(out.turns[1:], decision)
     out.reply = _compose(out.turns[1:], decision)
     out.duration_ms = int((time.time() - started) * 1000)
 

@@ -1,6 +1,6 @@
 .PHONY: setup data ingest reindex search agents ask lint test clean \
         agents-list triage book serve docker-build docker-run \
-        evals evals-smoke eval-one
+        evals evals-smoke eval-one redteam
 
 setup:
 	python -m venv .venv
@@ -72,3 +72,8 @@ evals-smoke:
 
 eval-one:
 	python3 evals/run_evals.py --only $(ID)
+
+# Attacks on the real agents: poisoned documents, other people's bookings,
+# prompt extraction. Needs Azure; ~60k tokens. Scratch stores, never live data.
+redteam:
+	python3 evals/red_team.py

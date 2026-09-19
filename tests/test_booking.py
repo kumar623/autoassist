@@ -82,20 +82,20 @@ def test_cancelling_frees_the_slot():
     s = first_slot()
     ref = booking.book_slot(s["slot_id"], "AP31AB1234", "service")["reference"]
     before = booking.get_slots(days=2)["count"]
-    assert booking.cancel_booking(ref)["ok"]
+    assert booking.cancel_booking(ref, "AP31AB1234")["ok"]
     assert booking.get_slots(days=2)["count"] == before + 1
 
 
 def test_cancelling_twice_is_refused():
     s = first_slot()
     ref = booking.book_slot(s["slot_id"], "AP31AB1234", "service")["reference"]
-    booking.cancel_booking(ref)
-    assert not booking.cancel_booking(ref)["ok"]
+    booking.cancel_booking(ref, "AP31AB1234")
+    assert not booking.cancel_booking(ref, "AP31AB1234")["ok"]
 
 
 def test_unknown_reference_is_refused():
-    assert not booking.cancel_booking("AA-NOPE00")["ok"]
-    assert not booking.get_booking("AA-NOPE00")["ok"]
+    assert not booking.cancel_booking("AA-NOPE00", "AP31AB1234")["ok"]
+    assert not booking.get_booking("AA-NOPE00", "AP31AB1234")["ok"]
 
 
 def test_past_dates_are_refused():
@@ -139,14 +139,17 @@ def test_a_vehicle_cannot_be_booked_twice_on_one_day():
     first = booking.book_slot(a["slot_id"], "AP31BP2133", "wiper blades")
     second = booking.book_slot(b["slot_id"], "ap 31 bp 2133", "wiper blades")
     assert not second["ok"]
-    assert first["reference"] in second["error"], "the agent needs the reference to cancel it"
     assert "move_service_booking" in second["error"]
+    # A registration is on the number plate. The refusal must not hand a stranger
+    # the reference that, with it, opens the booking (red team, 20 Sep).
+    assert first["reference"] not in second["error"]
+    assert first["time"] not in second["error"]
 
 
 def test_moving_a_booking_is_cancel_then_book():
     a, b = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wiper blades")["reference"]
-    assert booking.cancel_booking(ref)["ok"]
+    assert booking.cancel_booking(ref, "AP31BP2133")["ok"]
     moved = booking.book_slot(b["slot_id"], "AP31BP2133", "wiper blades")
     assert moved["ok"]
 
@@ -175,16 +178,16 @@ def test_different_vehicles_can_book_the_same_day():
 def test_moving_keeps_the_reference_and_changes_the_time():
     a, b = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
-    moved = booking.move_booking(ref, b["slot_id"])
+    moved = booking.move_booking(ref, b["slot_id"], "AP31BP2133")
     assert moved["ok"]
     assert moved["reference"] == ref
-    assert booking.get_booking(ref)["time"] == b["time"]
+    assert booking.get_booking(ref, "AP31BP2133")["time"] == b["time"]
 
 
 def test_moving_frees_the_old_slot():
     a, b = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
-    booking.move_booking(ref, b["slot_id"])
+    booking.move_booking(ref, b["slot_id"], "AP31BP2133")
     free = {s["slot_id"] for s in booking.get_slots(days=1)["slots"]}
     assert a["slot_id"] in free
     assert b["slot_id"] not in free
@@ -195,23 +198,75 @@ def test_moving_to_a_taken_slot_changes_nothing():
     a, b = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
     booking.book_slot(b["slot_id"], "AP31ZZ0001", "someone else")
-    moved = booking.move_booking(ref, b["slot_id"])
+    moved = booking.move_booking(ref, b["slot_id"], "AP31BP2133")
     assert not moved["ok"]
     assert "unchanged" in moved["error"]
-    kept = booking.get_booking(ref)
+    kept = booking.get_booking(ref, "AP31BP2133")
     assert kept["status"] == "confirmed" and kept["slot_id"] == a["slot_id"]
 
 
 def test_moving_to_an_invented_slot_changes_nothing():
     a, _ = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
-    assert not booking.move_booking(ref, "slot_10:30_2020-09-21")["ok"]
-    assert booking.get_booking(ref)["slot_id"] == a["slot_id"]
+    assert not booking.move_booking(ref, "slot_10:30_2020-09-21", "AP31BP2133")["ok"]
+    assert booking.get_booking(ref, "AP31BP2133")["slot_id"] == a["slot_id"]
 
 
 def test_a_cancelled_or_unknown_booking_cannot_be_moved():
     a, b = _two_slots_same_day()
     ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
-    booking.cancel_booking(ref)
-    assert not booking.move_booking(ref, b["slot_id"])["ok"]
-    assert not booking.move_booking("AA-NOPE00", b["slot_id"])["ok"]
+    booking.cancel_booking(ref, "AP31BP2133")
+    assert not booking.move_booking(ref, b["slot_id"], "AP31BP2133")["ok"]
+    assert not booking.move_booking("AA-NOPE00", b["slot_id"], "AP31BP2133")["ok"]
+
+
+# ---------------------------------------------------------------- who can see and change a booking
+#
+# Red team, 20 Sep: holding only a reference, a stranger was told another
+# customer's registration and fault, and cancelled their appointment. Now the
+# reference AND the registration it was booked with are needed.
+
+
+def _booked(reg="AP31ZZ9999"):
+    s = first_slot()
+    return booking.book_slot(s["slot_id"], reg, "clutch slipping")["reference"], s
+
+
+def test_the_owner_can_look_up_their_booking():
+    ref, _ = _booked()
+    b = booking.get_booking(ref, "ap31 zz 9999")
+    assert b["ok"] and b["issue"] == "clutch slipping"
+
+
+def test_a_reference_without_the_right_registration_reveals_nothing():
+    ref, _ = _booked()
+    r = booking.get_booking(ref, "AP31XX0000")
+    assert not r["ok"]
+    assert "AP31ZZ9999" not in r["error"] and "clutch" not in r["error"]
+
+
+def test_a_wrong_registration_looks_exactly_like_a_missing_booking():
+    """So guessing references cannot tell real ones from made-up ones."""
+    ref, _ = _booked()
+    wrong_owner = booking.get_booking(ref, "AP31XX0000")["error"].replace(ref, "REF")
+    no_such = booking.get_booking("AA-NOPE00", "AP31XX0000")["error"].replace("AA-NOPE00", "REF")
+    assert wrong_owner == no_such
+
+
+def test_a_missing_registration_is_refused():
+    ref, _ = _booked()
+    assert not booking.get_booking(ref, "")["ok"]
+    assert not booking.cancel_booking(ref, "")["ok"]
+
+
+def test_a_stranger_cannot_cancel_a_booking():
+    ref, _ = _booked()
+    assert not booking.cancel_booking(ref, "AP31XX0000")["ok"]
+    assert booking.get_booking(ref, "AP31ZZ9999")["status"] == "confirmed"
+
+
+def test_a_stranger_cannot_move_a_booking():
+    ref, s = _booked()
+    other = next(x for x in booking.get_slots(days=2)["slots"] if x["slot_id"] != s["slot_id"])
+    assert not booking.move_booking(ref, other["slot_id"], "AP31XX0000")["ok"]
+    assert booking.get_booking(ref, "AP31ZZ9999")["slot_id"] == s["slot_id"]

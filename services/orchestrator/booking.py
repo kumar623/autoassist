@@ -168,17 +168,21 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
         # One booking per vehicle per day, enforced here rather than asked for in
         # a prompt. Asked to "move it to 3:30", the booking agent booked 3:30 and
         # left the original in place - twice out of twice - despite being told to
-        # cancel the old one. The refusal names the existing booking, so the
-        # agent can cancel it if moving is what the customer wants.
-        for ref, b in data["bookings"].items():
+        # cancel the old one.
+        #
+        # The refusal does NOT name the existing booking's reference or time. A
+        # registration is printed on the car; anyone can read it. Handing out the
+        # reference here would let a stranger look up, move or cancel a booking
+        # knowing nothing but a number plate (red team, 20 Sep).
+        for b in data["bookings"].values():
             if b.get("status") == "confirmed" and b.get("registration") == reg and b.get("date") == d:
                 return {
                     "ok": False,
                     "error": (
-                        f"{reg} already has booking {ref} on {d} at {b['time']}. Only one "
-                        f"booking per vehicle per day. If the customer asked to move it, "
-                        f"use move_service_booking with reference {ref}. "
-                        f"Otherwise tell them they are already booked."
+                        f"{reg} already has a booking on {d}. Only one booking per vehicle per "
+                        f"day. If the customer wants a different time, ask for their booking "
+                        f"reference and use move_service_booking. Otherwise tell them they are "
+                        f"already booked that day."
                     ),
                 }
 
@@ -205,7 +209,7 @@ def book_slot(slot_id: str, registration: str, issue: str) -> dict:
     }
 
 
-def move_booking(reference: str, new_slot_id: str) -> dict:
+def move_booking(reference: str, new_slot_id: str, registration: str) -> dict:
     """Move a booking to another slot in one step. Changes nothing unless it works.
 
     Moving used to be cancel_booking then book_slot, run by the agent. Twice in
@@ -218,9 +222,9 @@ def move_booking(reference: str, new_slot_id: str) -> dict:
 
     with _LOCK:
         data = _load()
-        b = data["bookings"].get(ref)
+        b = _owned(data, ref, registration)
         if b is None or b.get("status") != "confirmed":
-            return {"ok": False, "error": f"No confirmed booking with reference {reference}."}
+            return _not_found(reference, registration)
 
         if new_slot_id == b["slot_id"]:
             return {"ok": False, "error": f"Booking {ref} is already at that time. Nothing changed."}
@@ -254,12 +258,12 @@ def move_booking(reference: str, new_slot_id: str) -> dict:
     }
 
 
-def cancel_booking(reference: str) -> dict:
+def cancel_booking(reference: str, registration: str) -> dict:
     with _LOCK:
         data = _load()
-        b = data["bookings"].get(reference.upper().strip())
+        b = _owned(data, reference.upper().strip(), registration)
         if b is None:
-            return {"ok": False, "error": f"No booking found with reference {reference}."}
+            return _not_found(reference, registration)
         if b["status"] == "cancelled":
             return {"ok": False, "error": f"Booking {reference} was already cancelled."}
         b["status"] = "cancelled"
@@ -267,11 +271,44 @@ def cancel_booking(reference: str) -> dict:
     return {"ok": True, "reference": reference, "message": f"Booking {reference} cancelled."}
 
 
-def get_booking(reference: str) -> dict:
-    b = _load()["bookings"].get(reference.upper().strip())
+def get_booking(reference: str, registration: str) -> dict:
+    b = _owned(_load(), reference.upper().strip(), registration)
     if b is None:
-        return {"ok": False, "error": f"No booking found with reference {reference}."}
+        return _not_found(reference, registration)
     return {"ok": True, **b}
+
+
+# ---------------------------------------------------------------- who owns a booking
+#
+# Looking up, moving and cancelling all need the reference AND the registration
+# the booking was made with - like an airline's booking code plus surname.
+# Before this, the reference alone was enough: in the red team on 20 Sep, a
+# stranger holding a reference was told another customer's registration and
+# fault, and could cancel their appointment. Enforced here, in code, because
+# "only show a customer their own booking" as a prompt rule is a request, not
+# a guarantee.
+
+
+def _norm(registration: str | None) -> str:
+    return (registration or "").upper().replace(" ", "")
+
+
+def _owned(data: dict, reference: str, registration: str) -> dict | None:
+    """The booking, only if this registration made it. Otherwise None."""
+    b = data["bookings"].get(reference)
+    if b is None or not _norm(registration) or b.get("registration") != _norm(registration):
+        return None
+    return b
+
+
+def _not_found(reference: str, registration: str) -> dict:
+    """The same answer whether the reference does not exist or belongs to someone
+    else, so guessing references does not reveal which ones are real."""
+    return {
+        "ok": False,
+        "error": f"No booking found with reference {reference} for registration {_norm(registration) or '(none given)'}. "
+        "Check both with the customer.",
+    }
 
 
 # ---------------------------------------------------------------- tickets
