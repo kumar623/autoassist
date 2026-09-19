@@ -2,7 +2,7 @@
 
 Endpoints:
     GET  /            the chat page
-    POST /chat        {"message": "..."} -> {"reply": "...", "trace": [...]}
+    POST /chat        {"message": "...", "history": [...]} -> {"reply": "...", "trace": [...]}
     GET  /health      liveness  - is the process up?
     GET  /ready       readiness - can it actually serve? (checks Azure)
     GET  /metrics     counters, in lieu of App Insights until week 3
@@ -21,6 +21,7 @@ import os
 import pathlib
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 from azure.ai.agents import AgentsClient
 from azure.identity import DefaultAzureCredential
@@ -114,8 +115,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AutoAssist", version="0.2.0", lifespan=lifespan)
 
 
+class HistoryTurn(BaseModel):
+    role: Literal["customer", "assistant"]
+    text: str = Field(..., max_length=MAX_MESSAGE_CHARS * 4)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
+    # The last few turns, oldest first, kept by the page. Optional, so a plain
+    # {"message": ...} call behaves exactly as it always did. The router uses
+    # only the most recent routing.MAX_HISTORY_TURNS; the cap here just keeps
+    # request bodies bounded.
+    history: list[HistoryTurn] = Field(default_factory=list, max_length=20)
 
 
 class ChatResponse(BaseModel):
@@ -179,6 +190,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             req.message.strip(),
             timeout=REQUEST_TIMEOUT,
             agent_ids=STATE["agent_ids"],
+            history=[h.model_dump() for h in req.history],
         )
     except Exception as e:  # noqa: BLE001
         METRICS["failures"] += 1

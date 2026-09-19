@@ -23,6 +23,11 @@ What this checks, and why each check exists:
   not_contains    Phrases that must not - "clutch" in a brake answer, which is
                   finding 2 turned into a permanent regression test.
 
+  agents          Conversation cases only (those with a "history"). They run
+                  the whole router rather than one agent, and check who the
+                  message reached - a registration typed in answer to booking's
+                  question must reach booking.
+
 Every case runs in its own fresh thread. Reusing one would let the model answer
 from chunks already in the history instead of searching again, which silently
 invalidates the whole run (finding 3).
@@ -48,6 +53,7 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from services.orchestrator import router as routing  # noqa: E402
 from services.orchestrator import runner  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -255,11 +261,57 @@ def score(case: dict, turn, known: set[str]) -> CaseResult:
     if want and want not in answer_lower:
         r.failures.append(f"expected a citation mentioning {want!r}")
 
+    # 7. which agents ran - conversation cases only. A registration typed in
+    # answer to booking's question must reach booking, not diagnostics.
+    agents = getattr(turn, "agents", None)
+    if agents is not None:
+        for a in case.get("expect_agents_include", []):
+            if a not in agents:
+                r.failures.append(f"expected {a} to run, route was {agents}")
+        for a in case.get("expect_agents_exclude", []):
+            if a in agents:
+                r.failures.append(f"{a} should not have run, route was {agents}")
+
     r.passed = not r.failures
     return r
 
 
+class ConversationTurn:
+    """A whole routed reply, shaped like the TurnResult that score() reads.
+
+    Single-agent cases test one prompt. Conversation cases test the router: what
+    triage made of a message given the turns before it, and who it sent it to.
+    """
+
+    def __init__(self, result):
+        self.answer = result.reply
+        self.agents = result.agents_used
+        self.searched = result.searched
+        self.tool_calls = [c for t in result.turns for c in t.tool_calls]
+        self.prompt_tokens = sum(t.prompt_tokens for t in result.turns)
+        self.completion_tokens = sum(t.completion_tokens for t in result.turns)
+        self.duration_ms = result.duration_ms
+        failed = [t for t in result.turns if not t.ok]
+        self.error = result.error or next((t.error or t.status for t in failed), None)
+        self.status = "completed" if self.error is None else "failed"
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
 def run_case(client: AgentsClient, agent_ids: dict, case: dict, known: set[str], timeout: float) -> CaseResult:
+    if "history" in case:
+        try:
+            result = routing.handle(
+                client, case["question"], timeout=timeout, agent_ids=agent_ids, history=case["history"]
+            )
+        except Exception as e:  # noqa: BLE001
+            r = CaseResult(id=case["id"], question=case["question"])
+            r.failures.append(f"{type(e).__name__}: {e}")
+            return r
+        return score(case, ConversationTurn(result), known)
+
     agent = case.get("agent", "diagnostics")
     agent_id = agent_ids.get(agent)
     if agent_id is None:

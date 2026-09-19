@@ -232,6 +232,11 @@ hand) · model-graded evaluation (the scorer checks compliance, not quality).
   run in parallel; see `docs/evaluation.md`. Triage is the largest remaining
   single cost at 2.8s for ~50 tokens of JSON. Streaming the first answer while
   the second works would cut perceived latency further.
+- **Conversation memory is the last six turns, kept by the page.** The server
+  holds no session, so any replica can answer any message; reload the page and
+  the conversation is gone. Booking and escalation see the recent turns.
+  Diagnostics sees only what the customer said earlier, never earlier answers,
+  so every question is searched afresh (finding 3).
 - **Bookings are a JSON file.** The interface is designed so Azure Table Storage
   or a real calendar drops in without touching the agents.
 - **No reranker** on the Free search tier.
