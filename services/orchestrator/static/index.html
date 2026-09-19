@@ -82,6 +82,46 @@
     font-size: 12px; padding: 4px 10px; font-weight: 400;
   }
   .hint { color: var(--muted); font-size: 13px; }
+
+  /* Tabs: Chat and Library */
+  [hidden] { display: none !important; }
+  header { flex-wrap: wrap; }
+  .tabs { display: flex; gap: 4px; margin-left: 8px; }
+  .tab {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    padding: 4px 12px; font-size: 13px; border-radius: 6px;
+  }
+  .tab[aria-selected="true"] { color: var(--accent); border-color: var(--line); background: var(--bg); }
+
+  /* Library */
+  #library { flex: 1; overflow-y: auto; padding: 20px; }
+  .lib-intro { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .lib-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .chip {
+    background: transparent; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 20px; padding: 5px 12px; font-size: 13px; font-weight: 500;
+  }
+  .chip[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #lib-filter { flex: 1 1 160px; padding: 7px 11px; }
+  .lib-note { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+  .doc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin: 0 0 8px; }
+  .doc > summary {
+    list-style: none; padding: 10px 14px; display: flex; gap: 8px 10px;
+    align-items: baseline; flex-wrap: wrap; color: var(--ink); font-size: 14px;
+  }
+  .doc > summary::-webkit-details-marker { display: none; }
+  .doc > summary:hover .doc-title { color: var(--accent); }
+  .doc-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+  .doc-title { flex: 1 1 200px; min-width: 0; }
+  .doc .tag { font-size: 12px; }
+  .doc-body { padding: 0 14px 12px; font-size: 14px; }
+  .doc-body h4 { margin: 12px 0 2px; font-size: 13px; }
+  .doc-body p { margin: 0 0 6px; }
+  .cite { font-size: 12px; color: var(--muted); }
+  .ask {
+    background: transparent; color: var(--accent); border: 1px solid var(--line);
+    font-size: 12px; padding: 4px 10px; margin-top: 6px;
+  }
 </style>
 </head>
 <body>
@@ -89,6 +129,10 @@
 <header>
   <h1>AutoAssist</h1>
   <span>vehicle service assistant</span>
+  <nav class="tabs" role="tablist" aria-label="View">
+    <button type="button" class="tab" role="tab" id="tab-chat" aria-selected="true" aria-controls="log">Chat</button>
+    <button type="button" class="tab" role="tab" id="tab-library" aria-selected="false" aria-controls="library">Library</button>
+  </nav>
   <span id="status">checking…</span>
 </header>
 
@@ -103,6 +147,20 @@ Everything I say about your vehicle comes from the workshop's service documents.
         <div class="hint" style="margin-top:8px">Try one of these:</div>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="library" role="tabpanel" aria-labelledby="tab-library" hidden>
+  <div class="wrap">
+    <p class="lib-intro" id="lib-intro">Everything the assistant can quote from, read live from the search index.</p>
+    <div class="lib-bar">
+      <button type="button" class="chip" data-kind="fault_codes" aria-pressed="true">Fault codes</button>
+      <button type="button" class="chip" data-kind="maintenance" aria-pressed="false">Maintenance</button>
+      <button type="button" class="chip" data-kind="bulletins" aria-pressed="false">Service bulletins</button>
+      <input type="text" id="lib-filter" placeholder="Filter, e.g. P0420, brake, wiper…" autocomplete="off" aria-label="Filter documents">
+    </div>
+    <p class="lib-note" id="lib-note"></p>
+    <div id="lib-list"><p class="hint">Loading…</p></div>
   </div>
 </div>
 
@@ -231,6 +289,164 @@ form.addEventListener('submit', e => {
 document.querySelectorAll('.examples button').forEach(b => {
   b.addEventListener('click', () => askServer(b.dataset.q));
 });
+
+// ---------------------------------------------------------------- tabs
+
+const views = {
+  chat: [document.getElementById('log'), document.querySelector('footer')],
+  library: [document.getElementById('library')],
+};
+const tabs = {chat: document.getElementById('tab-chat'), library: document.getElementById('tab-library')};
+
+function show(name) {
+  for (const [k, els] of Object.entries(views)) els.forEach(v => { v.hidden = k !== name; });
+  for (const [k, t] of Object.entries(tabs)) t.setAttribute('aria-selected', String(k === name));
+  if (name === 'library') loadLibrary();
+}
+tabs.chat.addEventListener('click', () => { show('chat'); box.focus(); });
+tabs.library.addEventListener('click', () => show('library'));
+
+// ---------------------------------------------------------------- library
+//
+// Everything the assistant can cite, from GET /library, which reads the search
+// index - the only place the bulletins exist, and exactly what the agents can
+// retrieve. Loaded once, on first open. Every piece of text goes in through
+// textContent: the bulletins were written by a model and are never treated as HTML.
+
+const listEl = document.getElementById('lib-list');
+const noteEl = document.getElementById('lib-note');
+const introEl = document.getElementById('lib-intro');
+const filterEl = document.getElementById('lib-filter');
+const chips = document.querySelectorAll('.chip');
+let lib = null;
+let libKind = 'fault_codes';
+let libLoading = false;
+
+const KINDS = {
+  fault_codes: {
+    label: 'Fault codes',
+    note: 'Real generic OBD-II codes, a public standard. Severity and whether it is safe to drive are what the assistant tells customers.',
+  },
+  maintenance: {
+    label: 'Maintenance',
+    note: 'Typical service intervals, written by hand for this project. A real owner’s handbook takes priority.',
+  },
+  bulletins: {
+    label: 'Service bulletins',
+    note: 'Fictional. Written by a language model for Corvale, a manufacturer that does not exist. Not real repair information.',
+  },
+};
+const SAFE = {'yes': 'safe to drive', 'yes-with-care': 'drive with care', 'no': 'do not drive'};
+
+function el(tagName, cls, text) {
+  const e = document.createElement(tagName);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function tag(text, warn) { return el('span', 'tag' + (warn ? ' warn' : ''), text); }
+function field(body, label, text) {
+  if (!text) return;
+  const p = el('p');
+  p.append(el('strong', null, label + ': '), document.createTextNode(text));
+  body.append(p);
+}
+
+// One expandable card. The body is built on first open, not up front: 30
+// bulletins of full text is a lot of DOM for a list most people scan.
+function card(id, title, tags, fillBody, question) {
+  const d = el('details', 'doc');
+  const s = el('summary');
+  if (id) s.append(el('span', 'doc-id', id));
+  s.append(el('span', 'doc-title', title), ...tags);
+  d.append(s);
+  d.addEventListener('toggle', () => {
+    if (!d.open || d.dataset.filled) return;
+    const body = el('div', 'doc-body');
+    fillBody(body);
+    const ask = el('button', 'ask', 'Ask the assistant about this');
+    ask.type = 'button';
+    ask.addEventListener('click', () => { show('chat'); box.value = question; box.focus(); });
+    body.append(ask);
+    d.append(body);
+    d.dataset.filled = '1';
+  });
+  return d;
+}
+
+const RENDER = {
+  fault_codes: c => card(
+    c.code, c.title,
+    [tag(c.severity + ' severity', c.severity === 'high'), tag(SAFE[c.safe_to_drive] || c.safe_to_drive, c.safe_to_drive === 'no')],
+    body => {
+      field(body, 'What it means', c.meaning);
+      field(body, 'Common causes', c.causes);
+      field(body, 'System', c.system);
+      body.append(el('p', 'cite', `The assistant cites this as (${c.cite_as})`));
+    },
+    `What does ${c.code} mean?`,
+  ),
+  maintenance: m => card(
+    '', m.item, [tag(m.interval)],
+    body => {
+      field(body, 'Interval', m.interval);
+      field(body, 'Notes', m.notes);
+      if (m.workshop_minutes) field(body, 'Typical workshop time', `${m.workshop_minutes} minutes`);
+      body.append(el('p', 'cite', `The assistant cites this as (${m.cite_as})`));
+    },
+    `When should the ${m.item.toLowerCase()} be done?`,
+  ),
+  bulletins: b => card(
+    b.number, b.topic || '(untitled)', b.vehicle ? [tag(b.vehicle)] : [],
+    body => {
+      for (const s of b.sections) {
+        body.append(el('h4', null, s.name), el('p', null, s.text), el('p', 'cite', `Cited as (${s.cite_as})`));
+      }
+    },
+    `What do the service documents say about ${b.topic}?`,
+  ),
+};
+
+function renderLibrary() {
+  if (!lib) return;
+  noteEl.textContent = KINDS[libKind].note;
+  const q = filterEl.value.trim().toLowerCase();
+  const all = lib[libKind];
+  const shown = q ? all.filter(d => JSON.stringify(Object.values(d)).toLowerCase().includes(q)) : all;
+  const frag = document.createDocumentFragment();
+  shown.forEach(d => frag.append(RENDER[libKind](d)));
+  if (!shown.length) frag.append(el('p', 'hint', q ? `Nothing matches “${filterEl.value.trim()}”.` : 'Nothing here yet.'));
+  else if (q) frag.prepend(el('p', 'hint', `${shown.length} of ${all.length}`));
+  listEl.replaceChildren(frag);
+}
+
+function loadLibrary() {
+  if (lib || libLoading) return;
+  libLoading = true;
+  fetch('/library')
+    .then(async r => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+      return r.json();
+    })
+    .then(data => {
+      lib = data;
+      const c = data.counts;
+      introEl.textContent =
+        `Everything the assistant can quote from: ${c.fault_codes + c.maintenance + c.bulletins} documents, ` +
+        `stored as ${c.pieces} searchable pieces, read live from the search index.`;
+      chips.forEach(ch => { ch.textContent = `${KINDS[ch.dataset.kind].label} · ${c[ch.dataset.kind]}`; });
+      renderLibrary();
+    })
+    .catch(e => { listEl.replaceChildren(el('p', 'hint', 'Could not load the library: ' + e.message)); })
+    .finally(() => { libLoading = false; });
+}
+
+chips.forEach(ch => ch.addEventListener('click', () => {
+  libKind = ch.dataset.kind;
+  chips.forEach(o => o.setAttribute('aria-pressed', String(o === ch)));
+  renderLibrary();
+}));
+filterEl.addEventListener('input', renderLibrary);
 
 fetch('/ready')
   .then(r => r.json().then(j => ({ok: r.ok, j})))

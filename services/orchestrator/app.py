@@ -3,6 +3,7 @@
 Endpoints:
     GET  /            the chat page
     POST /chat        {"message": "...", "history": [...]} -> {"reply": "...", "trace": [...]}
+    GET  /library     every document the assistant can cite, from the index
     GET  /health      liveness  - is the process up?
     GET  /ready       readiness - can it actually serve? (checks Azure)
     GET  /metrics     counters, in lieu of App Insights until week 3
@@ -30,8 +31,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from . import library, telemetry
 from . import router as routing
-from . import telemetry
 
 load_dotenv()
 
@@ -216,6 +217,16 @@ def chat(req: ChatRequest) -> ChatResponse:
         ms=result.duration_ms,
         trace=result.trace(),
     )
+
+
+@app.get("/library")
+def document_library() -> dict:
+    """Every document the assistant can cite, for the page's Library tab."""
+    try:
+        return library.load()
+    except Exception as e:  # noqa: BLE001
+        log.exception("could not read the document library")
+        raise HTTPException(503, detail=f"could not read the document library: {type(e).__name__}") from e
 
 
 @app.get("/")
