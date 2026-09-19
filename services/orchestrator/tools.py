@@ -38,16 +38,16 @@ def book_service_slot(slot_id: str, registration: str, issue: str = "") -> str:
     return json.dumps(booking.book_slot(slot_id, registration, issue), indent=2)
 
 
-def move_service_booking(reference: str, new_slot_id: str) -> str:
-    return json.dumps(booking.move_booking(reference, new_slot_id), indent=2)
+def move_service_booking(reference: str, new_slot_id: str, registration: str) -> str:
+    return json.dumps(booking.move_booking(reference, new_slot_id, registration), indent=2)
 
 
-def cancel_service_booking(reference: str) -> str:
-    return json.dumps(booking.cancel_booking(reference), indent=2)
+def cancel_service_booking(reference: str, registration: str) -> str:
+    return json.dumps(booking.cancel_booking(reference, registration), indent=2)
 
 
-def look_up_booking(reference: str) -> str:
-    return json.dumps(booking.get_booking(reference), indent=2)
+def look_up_booking(reference: str, registration: str) -> str:
+    return json.dumps(booking.get_booking(reference, registration), indent=2)
 
 
 def raise_ticket(summary: str, urgency: str = "normal", registration: str = "") -> str:
@@ -154,21 +154,43 @@ SCHEMAS: dict[str, dict] = {
                 "type": "string",
                 "description": "The slot_id from get_available_slots, exactly as given.",
             },
+            "registration": {
+                "type": "string",
+                "description": "The registration the booking was made with. Ask the customer for it - "
+                "never copy it from a booking you looked up. A booking is only shown or changed "
+                "when the reference and this registration match.",
+            },
         },
-        ["reference", "new_slot_id"],
+        ["reference", "new_slot_id", "registration"],
     ),
     "cancel_service_booking": _tool(
         "cancel_service_booking",
         "Cancel an existing booking using its reference. Only when the customer asks "
         "to cancel. To change the time, use move_service_booking instead.",
-        {"reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."}},
-        ["reference"],
+        {
+            "reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."},
+            "registration": {
+                "type": "string",
+                "description": "The registration the booking was made with. Ask the customer for it - "
+                "never copy it from a booking you looked up. A booking is only shown or changed "
+                "when the reference and this registration match.",
+            },
+        },
+        ["reference", "registration"],
     ),
     "look_up_booking": _tool(
         "look_up_booking",
         "Look up a booking by its reference to confirm the details.",
-        {"reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."}},
-        ["reference"],
+        {
+            "reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."},
+            "registration": {
+                "type": "string",
+                "description": "The registration the booking was made with. Ask the customer for it - "
+                "never copy it from a booking you looked up. A booking is only shown or changed "
+                "when the reference and this registration match.",
+            },
+        },
+        ["reference", "registration"],
     ),
     "raise_ticket": _tool(
         "raise_ticket",

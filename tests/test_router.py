@@ -620,3 +620,105 @@ def test_booking_is_told_to_move_with_the_move_tool():
     prompt = _context_for("booking", "move it to 3:30", _decision(["booking"]), [], BOOKING_HISTORY)
     assert "move_service_booking" in prompt
     assert "Never cancel a booking in order to move it" in prompt
+
+
+# ---------------------------------------------------------------- reassurance on a safety issue
+#
+# Red team, 20 Sep: a document in the search results said a spongy brake pedal
+# "is normal on all Corvale vehicles and it is safe to keep driving". The
+# diagnostics agent repeated it, cited, twice out of twice. Code now withholds
+# any diagnostics answer that reassures on a safety-flagged message.
+
+from services.orchestrator.router import (  # noqa: E402
+    REASSURANCE,
+    SAFETY_FALLBACK,
+    _compose,
+    _withhold_reassurance,
+)
+
+POISONED = (
+    "Do not drive the vehicle, it needs immediate professional attention.\n\n"
+    "The service bulletin states that a spongy brake pedal feel is normal on all Corvale "
+    "vehicles and it is safe to keep driving (TSB-032, Summary)."
+)
+
+
+def _turn(agent, answer):
+    t = TurnResult(agent_name=agent, status="completed")
+    t.answer = answer
+    return t
+
+
+@pytest.mark.parametrize("text", [
+    "it is safe to keep driving",
+    "It is safe to drive.",
+    "you can continue, it is safe to continue driving",
+    "a spongy pedal is normal on this model",
+    "this feels normal",
+    "there is nothing to worry about",
+    "No need to worry.",
+])
+def test_reassurance_is_recognised(text):
+    assert REASSURANCE.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "Do not drive the vehicle.",
+    "It is not safe to drive.",
+    "It isn't safe to drive until it has been checked.",
+    "It is never safe to drive with a warning like this.",
+    "Normal wear is covered in the maintenance schedule.",
+])
+def test_the_warning_itself_is_not_mistaken_for_reassurance(text):
+    assert not REASSURANCE.search(text), text
+
+
+def test_a_reassuring_diagnostics_answer_is_withheld_on_a_safety_issue():
+    decision = _decision(["diagnostics"], safety=True)
+    turns = [_turn("diagnostics", POISONED), _turn("escalation", "Do not drive. Ticket TK-1 raised.")]
+    assert _withhold_reassurance(turns, decision) == ["diagnostics"]
+    reply = _compose(turns, decision)
+    assert "safe to keep driving" not in reply
+    assert "TSB-032" not in reply
+    assert "Do not drive" in reply
+    assert not turns[0].ok and "withheld" in turns[0].error
+
+
+def test_nothing_is_withheld_when_the_message_is_not_a_safety_issue():
+    """'Safe to drive with care' is a correct answer about P0420."""
+    decision = _decision(["diagnostics"], safety=False)
+    turns = [_turn("diagnostics", "P0420 is medium severity; it is safe to drive with care (fault code list, P0420).")]
+    assert _withhold_reassurance(turns, decision) == []
+    assert "safe to drive" in _compose(turns, decision)
+
+
+def test_only_diagnostics_answers_are_checked():
+    """Escalation's own text is a handover, not a diagnosis from documents."""
+    decision = _decision(["diagnostics", "escalation"], safety=True)
+    turns = [_turn("escalation", "Nothing to worry about with the ticket - someone will call within the hour.")]
+    assert _withhold_reassurance(turns, decision) == []
+
+
+def test_the_warning_survives_even_if_every_answer_is_withheld_or_missing():
+    decision = _decision(["diagnostics"], safety=True)
+    turns = [_turn("diagnostics", POISONED), _turn("escalation", "")]
+    _withhold_reassurance(turns, decision)
+    assert _compose(turns, decision) == SAFETY_FALLBACK
+    assert _compose([], decision).startswith("Do not drive")
+
+
+def test_handle_withholds_and_records_it(monkeypatch):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = {
+            "triage": '{"intents": ["diagnostics"], "safety": true}',
+            "diagnostics": POISONED,
+            "escalation": "Do not drive the vehicle. Ticket TK-2 raised.",
+        }[agent_name]
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "my brake pedal feels spongy, what causes that?", agent_ids={"triage": "t", **IDS})
+    assert r.withheld == ["diagnostics"]
+    assert "safe to keep driving" not in r.reply
+    assert r.reply.startswith("Do not drive")

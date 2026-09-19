@@ -90,6 +90,26 @@ dependencies
 
 ---
 
+### Answers withheld on a safety issue
+
+`router._withhold_reassurance` drops a diagnostics answer that reassures ("safe
+to keep driving", "is normal") on a safety-flagged message. Each one is either a
+false alarm or a document telling customers something dangerous. Look at every
+one.
+
+```kql
+dependencies
+| where timestamp > ago(7d)
+| where name == "chat.request"
+| where isnotempty(customDimensions["autoassist.withheld"])
+| project timestamp, operation_Id, withheld = customDimensions["autoassist.withheld"]
+```
+
+Then search the service logs for `withheld a diagnostics answer` to see the
+text and find the document it came from.
+
+---
+
 ## Latency
 
 Where does the time actually go?
