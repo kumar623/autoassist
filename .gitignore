@@ -37,3 +37,6 @@ data/tickets.json
 
 # eval run output - keep the ones you want by committing them explicitly
 evals/results/
+
+# Zoho sign-in link: contains the MCP URL and its key
+.zoho-login-link
