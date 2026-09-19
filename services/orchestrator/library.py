@@ -158,7 +158,7 @@ def load() -> dict:
             return _cache["data"]
 
         fields = ["doc_type", "source_file", "section", "page", "severity", "title", "content"]
-        pieces = list(retrieval._search().search(search_text="*", select=fields, top=MAX_PIECES))
+        pieces = retrieval.fetch_all(fields, top=MAX_PIECES)
         if len(pieces) >= MAX_PIECES:
             log.warning("library read %d pieces, the most one search returns; some are missing", len(pieces))
 

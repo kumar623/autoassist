@@ -6,6 +6,9 @@ azure-identity==1.25.3
 azure-search-documents==12.0.0
 openai==2.48.0
 python-dotenv==1.2.1
+# The service calls Foundry, AI Search and Azure OpenAI over plain HTTPS
+# (docs/decisions/007). The SDKs above remain for the scripts until they move too.
+httpx==0.28.1
 pymupdf==1.26.5
 reportlab==5.0.1
 

@@ -89,6 +89,11 @@ tool** this service executes, which is what allows the floor, the cap, and
 control over how citations are worded. (It was also forced by a bug — see
 finding 5.)
 
+**No SDKs in the running service.** It calls Foundry, AI Search and Azure
+OpenAI directly over HTTPS: eleven requests, reproduced from the SDKs' recorded
+traffic and checked against the live system. `azure-identity` still handles
+sign-in. See [docs/decisions/007-plain-azure-apis.md](docs/decisions/007-plain-azure-apis.md).
+
 ---
 
 ## What this is actually for

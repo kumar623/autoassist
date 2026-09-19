@@ -12,6 +12,18 @@ Why not runs.create_and_process()? Two reasons:
 
 The loop: create the run, poll it, and when Azure says 'requires_action', run
 the requested functions here and submit the outputs back.
+
+Runs are the JSON the Foundry API returns (see foundry.py), not SDK objects.
+The fields read here:
+
+    status             queued | in_progress | requires_action | completed | failed |
+                       cancelling | cancelled | expired | incomplete
+    required_action    {"type": "submit_tool_outputs",
+                        "submit_tool_outputs": {"tool_calls": [
+                            {"id", "type": "function", "function": {"name", "arguments"}}]}}
+    last_error         {"code", "message"}          when failed
+    incomplete_details {"reason": ...}              when incomplete
+    usage              {"prompt_tokens", "completion_tokens", ...}
 """
 
 from __future__ import annotations
@@ -23,10 +35,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from azure.ai.agents import AgentsClient
-from azure.ai.agents.models import RequiredFunctionToolCall, SubmitToolOutputsAction, ToolOutput
-
 from . import telemetry, tools
+from .foundry import FoundryAgents
 
 log = logging.getLogger(__name__)
 
@@ -92,12 +102,18 @@ class TurnResult:
         return ", ".join(f"{c.name}({c.duration_ms}ms)" for c in self.tool_calls)
 
 
-def _status_of(run) -> str:
-    return str(run.status).lower().split(".")[-1]
+def _status_of(run: dict) -> str:
+    return str(run.get("status") or "").lower()
+
+
+def _error_text(err) -> str:
+    if isinstance(err, dict):
+        return f"{err.get('code') or 'error'}: {err.get('message') or ''}".strip(": ")
+    return str(err or "run failed")
 
 
 def run_turn(
-    client: AgentsClient,
+    client: FoundryAgents,
     agent_id: str,
     thread_id: str,
     timeout: float = 90.0,
@@ -126,7 +142,7 @@ def run_turn(
 
 
 def _run_turn_inner(
-    client: AgentsClient,
+    client: FoundryAgents,
     agent_id: str,
     thread_id: str,
     timeout: float,
@@ -135,8 +151,9 @@ def _run_turn_inner(
     out: TurnResult,
     started: float,
 ) -> None:
-    run = client.runs.create(thread_id=thread_id, agent_id=agent_id)
-    out.run_id = run.id
+    run = client.create_run(thread_id, agent_id)
+    run_id = run["id"]
+    out.run_id = run_id
 
     rounds = 0
     last_logged = None
@@ -147,25 +164,25 @@ def _run_turn_inner(
             out.status = _status_of(run)
             out.error = f"timed out after {timeout:.0f}s in state '{out.status}'"
             try:
-                client.runs.cancel(thread_id=thread_id, run_id=run.id)
+                client.cancel_run(thread_id, run_id)
             except Exception:  # noqa: BLE001 - cancelling is best effort
                 pass
             break
 
         status = _status_of(run)
         if status != last_logged:
-            log.info("run %s: %s (%.1fs)", run.id, status, elapsed)
+            log.info("run %s: %s (%.1fs)", run_id, status, elapsed)
             last_logged = status
 
         if status in TERMINAL:
             out.status = status
             if status == "failed":
-                out.error = str(getattr(run, "last_error", "run failed"))
+                out.error = _error_text(run.get("last_error"))
             elif status == "incomplete":
                 # The run stopped early. Azure says why in incomplete_details -
                 # usually max tokens or a content filter. Worth surfacing: the
                 # answer may be truncated mid-sentence.
-                why = getattr(run, "incomplete_details", None)
+                why = run.get("incomplete_details")
                 out.error = f"run ended early: {why or 'no reason given'}"
             elif status in ("cancelled", "cancelling", "expired"):
                 out.error = f"run {status}"
@@ -177,25 +194,25 @@ def _run_turn_inner(
                 out.status = status
                 out.error = f"stopped after {max_tool_rounds} rounds of tool calls (possible loop)"
                 try:
-                    client.runs.cancel(thread_id=thread_id, run_id=run.id)
+                    client.cancel_run(thread_id, run_id)
                 except Exception:  # noqa: BLE001
                     pass
                 break
 
-            action = run.required_action
-            if not isinstance(action, SubmitToolOutputsAction):
+            action = run.get("required_action") or {}
+            if action.get("type") != "submit_tool_outputs":
                 out.status = status
-                out.error = f"run needs an action we do not handle: {type(action).__name__}"
+                out.error = f"run needs an action we do not handle: {action.get('type') or 'none given'}"
                 break
 
-            outputs: list[ToolOutput] = []
-            for call in action.submit_tool_outputs.tool_calls:
-                if not isinstance(call, RequiredFunctionToolCall):
-                    outputs.append(ToolOutput(tool_call_id=call.id, output="ERROR: unsupported tool type"))
+            outputs: list[dict] = []
+            for call in (action.get("submit_tool_outputs") or {}).get("tool_calls") or []:
+                if call.get("type") != "function":
+                    outputs.append({"tool_call_id": call.get("id"), "output": "ERROR: unsupported tool type"})
                     continue
 
-                name = call.function.name
-                raw_args = call.function.arguments
+                name = call["function"]["name"]
+                raw_args = call["function"].get("arguments") or ""
 
                 with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
                     t0 = time.time()
@@ -229,17 +246,16 @@ def _run_turn_inner(
                 log.info("  tool %s(%s) -> %dms%s", name, parsed, ms,
                          " FAILED" if result.startswith("ERROR:") else "")
 
-                outputs.append(ToolOutput(tool_call_id=call.id, output=result))
+                outputs.append({"tool_call_id": call["id"], "output": result})
 
-            client.runs.submit_tool_outputs(thread_id=thread_id, run_id=run.id, tool_outputs=outputs)
+            client.submit_tool_outputs(thread_id, run_id, outputs)
 
         time.sleep(POLL_SECONDS)
-        run = client.runs.get(thread_id=thread_id, run_id=run.id)
+        run = client.get_run(thread_id, run_id)
 
-    usage = getattr(run, "usage", None)
-    if usage:
-        out.prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
-        out.completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+    usage = run.get("usage") or {}
+    out.prompt_tokens = usage.get("prompt_tokens") or 0
+    out.completion_tokens = usage.get("completion_tokens") or 0
 
     if out.status == "completed":
         out.answer = _latest_assistant_text(client, thread_id)
@@ -247,15 +263,16 @@ def _run_turn_inner(
     out.duration_ms = int((time.time() - started) * 1000)
 
 
-def _latest_assistant_text(client: AgentsClient, thread_id: str) -> str:
-    for m in client.messages.list(thread_id=thread_id):
-        if m.role == "assistant":
-            return "\n".join(p.text.value for p in m.text_messages).strip()
+def _latest_assistant_text(client: FoundryAgents, thread_id: str) -> str:
+    for m in client.list_messages(thread_id):
+        if m.get("role") == "assistant":
+            parts = [c["text"]["value"] for c in m.get("content") or [] if c.get("type") == "text"]
+            return "\n".join(parts).strip()
     return ""
 
 
 def ask(
-    client: AgentsClient,
+    client: FoundryAgents,
     agent_id: str,
     question: str,
     timeout: float = 90.0,
@@ -267,17 +284,17 @@ def ask(
     answer from chunks already in its history instead of searching again, which
     silently invalidates any test you run that way (finding 3).
     """
-    thread = client.threads.create()
+    thread_id = client.create_thread()["id"]
     try:
-        client.messages.create(thread_id=thread.id, role="user", content=question)
-        return run_turn(client, agent_id, thread.id, timeout=timeout, agent_name=agent_name)
+        client.create_message(thread_id, question)
+        return run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name)
     finally:
-        _CLEANUP.submit(_delete_thread, client, thread.id)
+        _CLEANUP.submit(_delete_thread, client, thread_id)
 
 
-def _delete_thread(client: AgentsClient, thread_id: str) -> None:
+def _delete_thread(client: FoundryAgents, thread_id: str) -> None:
     """Best effort. A thread we failed to delete costs nothing but clutter."""
     try:
-        client.threads.delete(thread_id)
+        client.delete_thread(thread_id)
     except Exception as e:  # noqa: BLE001
         log.debug("could not delete thread %s: %s", thread_id, e)

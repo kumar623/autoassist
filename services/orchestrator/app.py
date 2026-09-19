@@ -24,7 +24,6 @@ import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from azure.ai.agents import AgentsClient
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -33,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from . import library, telemetry
 from . import router as routing
+from .foundry import FoundryAgents
 
 load_dotenv()
 
@@ -94,12 +94,9 @@ async def lifespan(app: FastAPI):
     STATE["telemetry"] = telemetry.setup()
 
     try:
-        client = AgentsClient(
-            endpoint=os.environ["PROJECT_ENDPOINT"],
-            credential=DefaultAzureCredential(),
-        )
+        client = FoundryAgents(os.environ["PROJECT_ENDPOINT"], DefaultAzureCredential())
         STATE["client"] = client
-        STATE["agent_ids"] = {a.name: a.id for a in client.list_agents()}
+        STATE["agent_ids"] = {a["name"]: a["id"] for a in client.list_agents()}
         log.info("ready, agents: %s", list(STATE["agent_ids"]))
     except Exception as e:  # noqa: BLE001
         # Start anyway. /ready will report unhealthy, /health stays up, and the
