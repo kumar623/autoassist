@@ -15,13 +15,13 @@ import os
 import pathlib
 import sys
 
-from azure.ai.agents import AgentsClient
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
 load_dotenv()
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from services.orchestrator import runner  # noqa: E402
+from services.orchestrator.foundry import FoundryAgents  # noqa: E402
 
 
 def main() -> int:
@@ -37,16 +37,13 @@ def main() -> int:
         format="%(message)s",
     )
 
-    with AgentsClient(
-        endpoint=os.environ["PROJECT_ENDPOINT"],
-        credential=DefaultAzureCredential(),
-    ) as client:
-        agent = next((a for a in client.list_agents() if a.name == args.agent), None)
+    with FoundryAgents(os.environ["PROJECT_ENDPOINT"], DefaultAzureCredential()) as client:
+        agent = next((a for a in client.list_agents() if a["name"] == args.agent), None)
         if agent is None:
             print(f"agent '{args.agent}' not found. Run: python3 agents/deploy_agents.py")
             return 1
 
-        result = runner.ask(client, agent.id, args.question, timeout=args.timeout, agent_name=args.agent)
+        result = runner.ask(client, agent["id"], args.question, timeout=args.timeout, agent_name=args.agent)
 
     print("\n" + "=" * 74)
     print(result.answer or "(no answer)")

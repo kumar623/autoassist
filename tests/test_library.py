@@ -141,12 +141,11 @@ def test_build_groups_counts_and_sorts():
 def test_load_is_cached(monkeypatch):
     calls = []
 
-    class FakeSearch:
-        def search(self, **kw):
-            calls.append(kw)
-            return [DTC, MAINT, HEADER]
+    def fetch_all(fields, top=1000):
+        calls.append((fields, top))
+        return [DTC, MAINT, HEADER]
 
-    monkeypatch.setattr(library.retrieval, "_search", lambda: FakeSearch())
+    monkeypatch.setattr(library.retrieval, "fetch_all", fetch_all)
     monkeypatch.setattr(library, "_cache", {"at": 0.0, "data": None})
 
     first = library.load()

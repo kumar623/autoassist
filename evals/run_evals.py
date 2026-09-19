@@ -46,7 +46,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from azure.ai.agents import AgentsClient
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
@@ -55,6 +54,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from services.orchestrator import router as routing  # noqa: E402
 from services.orchestrator import runner  # noqa: E402
+from services.orchestrator.foundry import FoundryAgents  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "evals" / "golden_set.jsonl"
@@ -300,7 +300,7 @@ class ConversationTurn:
         return self.error is None
 
 
-def run_case(client: AgentsClient, agent_ids: dict, case: dict, known: set[str], timeout: float) -> CaseResult:
+def run_case(client: FoundryAgents, agent_ids: dict, case: dict, known: set[str], timeout: float) -> CaseResult:
     if "history" in case:
         try:
             result = routing.handle(
@@ -361,11 +361,8 @@ def main() -> int:
     started = time.time()
     results: list[CaseResult] = []
 
-    with AgentsClient(
-        endpoint=os.environ["PROJECT_ENDPOINT"],
-        credential=DefaultAzureCredential(),
-    ) as client:
-        agent_ids = {a.name: a.id for a in client.list_agents()}
+    with FoundryAgents(os.environ["PROJECT_ENDPOINT"], DefaultAzureCredential()) as client:
+        agent_ids = {a["name"]: a["id"] for a in client.list_agents()}
 
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = {

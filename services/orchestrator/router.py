@@ -32,9 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 
-from azure.ai.agents import AgentsClient
-
 from . import telemetry
+from .foundry import FoundryAgents
 from .runner import TurnResult, ask
 
 log = logging.getLogger(__name__)
@@ -243,8 +242,8 @@ def _parse_triage(text: str, message: str) -> TriageDecision:
     )
 
 
-def _agent_ids(client: AgentsClient) -> dict[str, str]:
-    return {a.name: a.id for a in client.list_agents()}
+def _agent_ids(client: FoundryAgents) -> dict[str, str]:
+    return {a["name"]: a["id"] for a in client.list_agents()}
 
 
 def small_talk_reply(message: str) -> str | None:
@@ -412,7 +411,7 @@ def _plan(route: list[str]) -> list[list[str]]:
 
 
 def _run_specialists(
-    client: AgentsClient,
+    client: FoundryAgents,
     ids: dict[str, str],
     route: list[str],
     message: str,
@@ -503,7 +502,7 @@ def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
 
 
 def handle(
-    client: AgentsClient,
+    client: FoundryAgents,
     message: str,
     timeout: float = 90.0,
     agent_ids: dict[str, str] | None = None,
@@ -545,7 +544,7 @@ def handle(
 
 
 def _handle_inner(
-    client: AgentsClient,
+    client: FoundryAgents,
     message: str,
     timeout: float,
     agent_ids: dict[str, str] | None,

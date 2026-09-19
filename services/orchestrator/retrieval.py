@@ -17,6 +17,10 @@ could not do:
 Scores here are reciprocal rank fusion sums, so they sit around 0.016 for a
 chunk found by one method and 0.032 for one found by both. The absolute number
 is meaningless on its own - only the ordering and the relative size matter.
+
+Both calls are plain HTTPS (docs/decisions/007): one POST to Azure OpenAI to
+embed the question, one POST to AI Search with the text and the vector. Same
+URLs, API versions and bodies the SDKs sent - recorded, then reproduced.
 """
 
 from __future__ import annotations
@@ -26,15 +30,22 @@ import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-from azure.core.credentials import AzureKeyCredential
-from azure.search.documents import SearchClient
-from azure.search.documents.models import VectorizedQuery
-from openai import AzureOpenAI
+import httpx
+
+from . import azure_http
 
 log = logging.getLogger(__name__)
 
 INDEX_NAME = os.getenv("SEARCH_INDEX_NAME", "service-docs")
 EMBED_DEPLOYMENT = os.getenv("EMBED_DEPLOYMENT", "text-embedding-3-small")
+SEARCH_API_VERSION = os.getenv("SEARCH_API_VERSION", "2026-04-01")  # what azure-search-documents 12.0.0 sent
+
+# The only values doc_type may take. The agent's tool schema says so, but the
+# model writes the value, and it goes into a search filter - so it is checked
+# here rather than trusted.
+DOC_TYPES = ("dtc", "maintenance", "bulletin")
+
+RESULT_FIELDS = ["id", "title", "content", "doc_type", "source_file", "section", "page", "severity"]
 
 # Tuning. Defaults chosen by hand in week 2; week 3 measures them properly
 # against evals/golden_set.jsonl before anyone claims they are right.
@@ -93,25 +104,45 @@ class RetrievalResult:
 
 
 @lru_cache(maxsize=1)
-def _openai() -> AzureOpenAI:
-    return AzureOpenAI(
-        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
-    )
-
-
-@lru_cache(maxsize=1)
-def _search() -> SearchClient:
-    return SearchClient(
-        endpoint=os.environ["SEARCH_ENDPOINT"],
-        index_name=INDEX_NAME,
-        credential=AzureKeyCredential(os.environ["SEARCH_API_KEY"]),
-    )
+def _client() -> httpx.Client:
+    """One connection pool for both APIs, reused across requests and threads."""
+    return azure_http.new_client()
 
 
 def embed(text: str) -> list[float]:
-    return _openai().embeddings.create(model=EMBED_DEPLOYMENT, input=[text]).data[0].embedding
+    """The question as a vector, from the same model that embedded the documents."""
+    base = os.environ["AZURE_OPENAI_ENDPOINT"].rstrip("/")
+    data = azure_http.request(
+        _client(),
+        "POST",
+        f"{base}/openai/deployments/{EMBED_DEPLOYMENT}/embeddings",
+        headers={"api-key": os.environ["AZURE_OPENAI_API_KEY"]},
+        params={"api-version": os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")},
+        json={"input": [text]},
+    )
+    return data["data"][0]["embedding"]
+
+
+def _query_index(body: dict) -> list[dict]:
+    """POST a search to the index and return its results ("value")."""
+    base = os.environ["SEARCH_ENDPOINT"].rstrip("/")
+    data = azure_http.request(
+        _client(),
+        "POST",
+        f"{base}/indexes('{INDEX_NAME}')/docs/search.post.search",
+        headers={"api-key": os.environ["SEARCH_API_KEY"]},
+        params={"api-version": SEARCH_API_VERSION},
+        json=body,
+    )
+    return data.get("value") or []
+
+
+def fetch_all(fields: list[str], top: int = 1000) -> list[dict]:
+    """Every piece in the index, with the chosen fields. For the Library tab.
+
+    One search returns at most 1000 results; library.py warns if it gets that many.
+    """
+    return _query_index({"search": "*", "select": ",".join(fields), "top": top})
 
 
 def search(
@@ -131,26 +162,28 @@ def search(
     floor. That is the point: a wrong answer that looks sourced is worse than
     no answer.
     """
+    if doc_type and doc_type not in DOC_TYPES:
+        # Refused, not ignored: the agent gets an error it can read and retry
+        # without the filter. Never pasted into the filter as written.
+        raise ValueError(f"doc_type must be one of {', '.join(DOC_TYPES)}, or left out; got {doc_type!r}")
+
     result = RetrievalResult(query=query)
     want = top_k * CANDIDATE_MULTIPLIER
 
-    kwargs: dict = {
-        "search_text": query,
+    body: dict = {
+        "search": query,
         "top": want,
-        "select": [
-            "id", "title", "content", "doc_type",
-            "source_file", "section", "page", "severity",
-        ],
-        "vector_queries": [
-            VectorizedQuery(vector=embed(query), k_nearest_neighbors=want, fields="content_vector")
-        ],
+        "select": ",".join(RESULT_FIELDS),
+        # Hybrid: the text above goes to BM25, this vector to HNSW, and Azure
+        # merges the two rankings with reciprocal rank fusion.
+        "vectorQueries": [{"kind": "vector", "vector": embed(query), "k": want, "fields": "content_vector"}],
     }
     if doc_type:
-        kwargs["filter"] = f"doc_type eq '{doc_type}'"
+        body["filter"] = f"doc_type eq '{doc_type}'"
 
     per_source: dict[str, int] = {}
 
-    for raw in _search().search(**kwargs):
+    for raw in _query_index(body):
         result.candidates_seen += 1
         score = float(raw["@search.score"])
 
