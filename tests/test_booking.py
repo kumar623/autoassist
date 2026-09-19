@@ -125,3 +125,93 @@ def test_safety_ticket_promises_an_hour():
 def test_unknown_urgency_falls_back_to_normal():
     r = booking.create_ticket("something", "extremely-urgent")
     assert r["urgency"] == "normal"
+
+
+def _two_slots_same_day():
+    slots = booking.get_slots(days=1)["slots"]
+    return slots[0], slots[1]
+
+
+def test_a_vehicle_cannot_be_booked_twice_on_one_day():
+    """Local replay, 19 Sep: asked to 'move it to 3:30', the agent booked 3:30 and
+    left 2:00 in place. Two out of two runs, despite being told to cancel."""
+    a, b = _two_slots_same_day()
+    first = booking.book_slot(a["slot_id"], "AP31BP2133", "wiper blades")
+    second = booking.book_slot(b["slot_id"], "ap 31 bp 2133", "wiper blades")
+    assert not second["ok"]
+    assert first["reference"] in second["error"], "the agent needs the reference to cancel it"
+    assert "move_service_booking" in second["error"]
+
+
+def test_moving_a_booking_is_cancel_then_book():
+    a, b = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wiper blades")["reference"]
+    assert booking.cancel_booking(ref)["ok"]
+    moved = booking.book_slot(b["slot_id"], "AP31BP2133", "wiper blades")
+    assert moved["ok"]
+
+
+def test_the_same_vehicle_can_book_another_day():
+    slots = booking.get_slots(days=2)["slots"]
+    day1 = slots[0]
+    day2 = next(s for s in slots if s["date"] != day1["date"])
+    assert booking.book_slot(day1["slot_id"], "AP31BP2133", "service")["ok"]
+    assert booking.book_slot(day2["slot_id"], "AP31BP2133", "service")["ok"]
+
+
+def test_different_vehicles_can_book_the_same_day():
+    a, b = _two_slots_same_day()
+    assert booking.book_slot(a["slot_id"], "AP31BP2133", "service")["ok"]
+    assert booking.book_slot(b["slot_id"], "AP31CD5678", "service")["ok"]
+
+
+# ---------------------------------------------------------------- moving
+#
+# Moving used to be cancel then book, done by the agent. In local replays it
+# stopped between the two - once to ask, once because the new time was taken -
+# and the customer was left with nothing. move_booking checks first, then changes.
+
+
+def test_moving_keeps_the_reference_and_changes_the_time():
+    a, b = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
+    moved = booking.move_booking(ref, b["slot_id"])
+    assert moved["ok"]
+    assert moved["reference"] == ref
+    assert booking.get_booking(ref)["time"] == b["time"]
+
+
+def test_moving_frees_the_old_slot():
+    a, b = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
+    booking.move_booking(ref, b["slot_id"])
+    free = {s["slot_id"] for s in booking.get_slots(days=1)["slots"]}
+    assert a["slot_id"] in free
+    assert b["slot_id"] not in free
+
+
+def test_moving_to_a_taken_slot_changes_nothing():
+    """The exact failure: new time taken, and the original must survive."""
+    a, b = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
+    booking.book_slot(b["slot_id"], "AP31ZZ0001", "someone else")
+    moved = booking.move_booking(ref, b["slot_id"])
+    assert not moved["ok"]
+    assert "unchanged" in moved["error"]
+    kept = booking.get_booking(ref)
+    assert kept["status"] == "confirmed" and kept["slot_id"] == a["slot_id"]
+
+
+def test_moving_to_an_invented_slot_changes_nothing():
+    a, _ = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
+    assert not booking.move_booking(ref, "slot_10:30_2020-09-21")["ok"]
+    assert booking.get_booking(ref)["slot_id"] == a["slot_id"]
+
+
+def test_a_cancelled_or_unknown_booking_cannot_be_moved():
+    a, b = _two_slots_same_day()
+    ref = booking.book_slot(a["slot_id"], "AP31BP2133", "wipers")["reference"]
+    booking.cancel_booking(ref)
+    assert not booking.move_booking(ref, b["slot_id"])["ok"]
+    assert not booking.move_booking("AA-NOPE00", b["slot_id"])["ok"]

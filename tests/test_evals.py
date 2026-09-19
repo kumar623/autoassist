@@ -357,3 +357,68 @@ def test_other_early_endings_still_fail_even_when_the_filter_is_allowed():
     turn = FakeTurn("", ok=False, status="incomplete")
     turn.error = "run ended early: {'reason': 'max_completion_tokens'}"
     assert not run_evals.score(case, turn, KNOWN).passed
+
+
+# ---------------------------------------------------------------- conversation cases
+
+
+from services.orchestrator.router import RouterResult  # noqa: E402
+from services.orchestrator.runner import ToolCallRecord, TurnResult  # noqa: E402
+
+
+def _routed(agents, reply="Here are some times.", failed=None, searched=False):
+    turns = []
+    for a in agents:
+        t = TurnResult(agent_name=a, status="failed" if a == failed else "completed")
+        if a == failed:
+            t.error = "boom"
+        if searched and a == "diagnostics":
+            t.tool_calls = [ToolCallRecord("search_service_docs", {}, "", 5)]
+        turns.append(t)
+    return run_evals.ConversationTurn(RouterResult(reply=reply, turns=turns, duration_ms=10))
+
+
+def test_a_conversation_reaching_the_right_agent_passes():
+    case = {"id": "c", "question": "ap31bd1213",
+            "expect_agents_include": ["booking"], "expect_agents_exclude": ["diagnostics"]}
+    r = run_evals.score(case, _routed(["triage", "booking"]), KNOWN)
+    assert r.passed, r.failures
+
+
+def test_a_registration_sent_to_diagnostics_fails():
+    """The live-app regression: the number plate was searched for in the library."""
+    case = {"id": "c", "question": "ap31bd1213",
+            "expect_agents_include": ["booking"], "expect_agents_exclude": ["diagnostics"]}
+    r = run_evals.score(case, _routed(["triage", "diagnostics"]), KNOWN)
+    assert not r.passed
+    assert len(r.failures) == 2
+
+
+def test_a_failed_specialist_fails_a_conversation_case():
+    case = {"id": "c", "question": "q", "expect_agents_include": ["booking"]}
+    r = run_evals.score(case, _routed(["triage", "booking"], failed="booking"), KNOWN)
+    assert not r.passed
+    assert any("did not complete" in f for f in r.failures)
+
+
+def test_a_follow_up_that_does_not_search_fails():
+    case = {"id": "c", "question": "is it safe to drive with it?", "expect_search_call": True}
+    assert not run_evals.score(case, _routed(["triage", "diagnostics"]), KNOWN).passed
+    assert run_evals.score(case, _routed(["triage", "diagnostics"], searched=True), KNOWN).passed
+
+
+def test_single_agent_cases_skip_the_route_check():
+    """A TurnResult has no .agents, so the route expectations do not apply."""
+    case = {"id": "x", "question": "q", "expect_agents_include": ["booking"]}
+    assert run_evals.score(case, FakeTurn("fine"), KNOWN).passed
+
+
+def test_conversation_cases_in_the_golden_set_are_well_formed():
+    for c in run_evals.load_cases(None, smoke=False):
+        if "history" not in c:
+            continue
+        assert c["history"], c["id"]
+        for turn in c["history"]:
+            assert turn["role"] in ("customer", "assistant"), c["id"]
+            assert turn["text"], c["id"]
+        assert c.get("expect_agents_include") or c.get("expect_agents_exclude"), c["id"]

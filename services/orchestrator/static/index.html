@@ -127,6 +127,12 @@ const box = document.getElementById('q');
 const send = document.getElementById('send');
 const status = document.getElementById('status');
 
+// The server keeps no conversation state, so the page sends the last few turns
+// with each message. Without this, a registration typed in answer to "what is
+// your registration?" arrived on its own and nobody knew what it was for.
+const history = [];
+const HISTORY_SENT = 6;
+
 function add(who, text, cls) {
   const row = document.createElement('div');
   row.className = 'msg' + (who === 'You' ? ' you' : '');
@@ -151,7 +157,7 @@ function meta(col, data) {
 
   const agents = document.createElement('span');
   agents.className = 'tag';
-  agents.textContent = data.agents.join(' → ');
+  agents.textContent = data.agents.length ? data.agents.join(' → ') : 'no agents needed';
   m.appendChild(agents);
 
   const s = document.createElement('span');
@@ -193,7 +199,7 @@ async function askServer(text) {
     const r = await fetch('/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
+      body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT)})
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({detail: r.statusText}));
@@ -202,6 +208,9 @@ async function askServer(text) {
     }
     const data = await r.json();
     bubble.textContent = data.reply;
+    // Only exchanges that got a real answer. A failed turn is not something the
+    // customer was told, so it should not be context for the next one.
+    history.push({role: 'customer', text}, {role: 'assistant', text: data.reply});
     if (data.safety) bubble.classList.add('safety');
     meta(col, data);
   } catch (e) {

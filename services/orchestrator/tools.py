@@ -38,6 +38,10 @@ def book_service_slot(slot_id: str, registration: str, issue: str = "") -> str:
     return json.dumps(booking.book_slot(slot_id, registration, issue), indent=2)
 
 
+def move_service_booking(reference: str, new_slot_id: str) -> str:
+    return json.dumps(booking.move_booking(reference, new_slot_id), indent=2)
+
+
 def cancel_service_booking(reference: str) -> str:
     return json.dumps(booking.cancel_booking(reference), indent=2)
 
@@ -54,6 +58,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "search_service_docs": search_service_docs,
     "get_available_slots": get_available_slots,
     "book_service_slot": book_service_slot,
+    "move_service_booking": move_service_booking,
     "cancel_service_booking": cancel_service_booking,
     "look_up_booking": look_up_booking,
     "raise_ticket": raise_ticket,
@@ -137,9 +142,25 @@ SCHEMAS: dict[str, dict] = {
         },
         ["slot_id", "registration"],
     ),
+    "move_service_booking": _tool(
+        "move_service_booking",
+        "Move an existing booking to a different free slot, in one step. This is the "
+        "ONLY way to change a booking's time - never cancel and rebook. The reference "
+        "stays the same. If the new slot is not free, nothing changes and the booking "
+        "stays where it was.",
+        {
+            "reference": {"type": "string", "description": "The existing booking reference, e.g. AA-4K2P9X."},
+            "new_slot_id": {
+                "type": "string",
+                "description": "The slot_id from get_available_slots, exactly as given.",
+            },
+        },
+        ["reference", "new_slot_id"],
+    ),
     "cancel_service_booking": _tool(
         "cancel_service_booking",
-        "Cancel an existing booking using its reference.",
+        "Cancel an existing booking using its reference. Only when the customer asks "
+        "to cancel. To change the time, use move_service_booking instead.",
         {"reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."}},
         ["reference"],
     ),
