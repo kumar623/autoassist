@@ -34,7 +34,12 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # main only: the federated credential trusts refs/heads/main, so a run from
+    # any other branch would fail at login. This used to also require
+    # event_name == 'push', copied over from CI - but this workflow is never
+    # triggered by a push, so every run was skipped.
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v5
 

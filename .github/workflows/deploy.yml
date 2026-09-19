@@ -41,9 +41,16 @@ jobs:
   deploy:
     # workflow_run fires whether CI passed or failed, so the conclusion has to
     # be checked here. Without this line, a red build deploys.
+    #
+    # And it fires for pull requests too. The `branches: [main]` filter above
+    # matches the PR's SOURCE branch name, so a fork with a branch called main
+    # would pass it, and this job would build and deploy the fork's commit with
+    # production credentials. Only a push to main in this repository deploys.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
 
     runs-on: ubuntu-latest
 
@@ -101,6 +108,10 @@ jobs:
                     -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
                     --query "properties.template.containers[0].image" -o tsv)
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          # Images are tagged with the SHA they were built from ("bootstrap" for
+          # the first one), so the tag is what /health should report after a
+          # rollback.
+          echo "sha=${IMAGE##*:}" >> "$GITHUB_OUTPUT"
           echo "Currently serving: $IMAGE"
 
       - uses: docker/setup-buildx-action@v3
@@ -191,33 +202,54 @@ jobs:
       # login leaves the running app untouched, and "rolling back" from there
       # would be a deploy of its own.
       - name: Roll back
+        id: rollback
         if: failure() && steps.deploy.outcome == 'success'
         run: |
           set -euo pipefail
           PREVIOUS="${{ steps.current.outputs.image }}"
+          PREVIOUS_SHA="${{ steps.current.outputs.sha }}"
           echo "::warning::Smoke test failed. Rolling back to $PREVIOUS"
 
+          # GIT_SHA goes back too. On 12 Sep a rollback swapped the image but
+          # left GIT_SHA at the failed build, so /health went on reporting a
+          # build that was no longer running.
           az containerapp update \
             -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
             --image "$PREVIOUS" \
+            --set-env-vars GIT_SHA="$PREVIOUS_SHA" \
             --output none
 
           FQDN=$(az containerapp show \
                    -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
                    --query "properties.configuration.ingress.fqdn" -o tsv)
+          URL="https://$FQDN"
 
-          # Verify the rollback rather than assuming it. A rollback that quietly
-          # failed is worse than the original problem, because nobody is looking
-          # any more.
-          for i in $(seq 1 36); do
-            if curl -sf --max-time 10 "https://$FQDN/health" > /dev/null; then
-              echo "Rolled back and healthy after $((i * 5))s."
-              exit 0
+          # Verify the rollback with the same two checks as the smoke test.
+          # Any HTTP 200 from /health is not enough: the 12 Sep rollback passed
+          # that in 5s, which proves nothing about which build answered or
+          # whether it could serve.
+          for i in $(seq 1 48); do
+            GOT=$(curl -sf --max-time 10 "$URL/health" | jq -r '.build // empty' || true)
+            if [ "$GOT" = "$PREVIOUS_SHA" ]; then
+              echo "Previous build $GOT is serving after $((i * 5))s."
+              break
+            fi
+            if [ "$i" = "48" ]; then
+              echo "::error::Rollback did not come back: serving '${GOT:-nothing}', expected '$PREVIOUS_SHA'. Manual intervention needed."
+              exit 1
             fi
             sleep 5
           done
-          echo "::error::Rollback did not come back healthy. Manual intervention needed."
-          exit 1
+
+          if ! curl -sf --max-time 20 "$URL/ready"; then
+            echo
+            curl -s --max-time 20 "$URL/ready" || true
+            echo
+            echo "::error::Rolled back, but the previous build is not ready either. The fault is in Azure (roles, endpoints, agents), not in the code."
+            exit 1
+          fi
+          echo
+          echo "Rolled back and ready."
 
       - name: Log what happened
         if: always()
@@ -232,5 +264,6 @@ jobs:
             echo "| previous image | \`${{ steps.current.outputs.image }}\` |"
             echo "| deploy | ${{ steps.deploy.outcome }} |"
             echo "| smoke test | ${{ steps.smoke.outcome }} |"
+            echo "| rollback | ${{ steps.rollback.outcome }} |"
             echo "| url | ${{ steps.smoke.outputs.url }} |"
           } >> "$GITHUB_STEP_SUMMARY"
