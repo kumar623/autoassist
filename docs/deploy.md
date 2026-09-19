@@ -3,8 +3,9 @@
 `.github/workflows/deploy.yml` builds an image, pushes it, deploys it, checks it
 is really serving, and puts the old one back if it is not.
 
-It runs **only after CI passes on main**. Green CI is the entry condition, not a
-second opinion.
+It runs **only after CI passes on a push to main in this repository**. Green CI
+is the entry condition, not a second opinion. CI on a pull request - including
+one from a fork whose branch happens to be called `main` - never deploys.
 
 ## The shape of it
 
@@ -75,7 +76,8 @@ federated identity record found`. The string must match character for character.
 
 ```bash
 SUB=$(az account show --query id -o tsv)
-RG=rg-autoassist          # the resource group the app actually runs in
+RG=Ai_solution            # the resource group the app actually runs in
+                          # (rg-autoassist is the Foundry ACCOUNT's name, not a group)
 ACR=<your registry name>
 APP=<your container app name>
 
@@ -113,11 +115,33 @@ habit and because there is no reason to publish them.
 
 | name | value |
 |---|---|
-| `AZURE_RESOURCE_GROUP` | e.g. `rg-autoassist` |
+| `AZURE_RESOURCE_GROUP` | e.g. `Ai_solution` |
 | `AZURE_CONTAINER_APP` | e.g. `ca-autoassist` |
 | `AZURE_REGISTRY` | the login server, e.g. `crautoassist.azurecr.io` |
 
-### 4. Optional: require an approval
+### 4. For the weekly evals
+
+`.github/workflows/evals.yml` runs real questions against the agents, so it needs
+more than the deploy does. Without these it skips with a notice rather than
+failing.
+
+**Variables:** `PROJECT_ENDPOINT`, `AZURE_OPENAI_ENDPOINT`, `SEARCH_ENDPOINT`
+**Secrets:** `AZURE_OPENAI_API_KEY`, `SEARCH_API_KEY`
+
+And the GitHub identity needs to list and run agents - the same role the app
+needs, on the Foundry account only:
+
+```bash
+AI_ID=$(az cognitiveservices account show -g "$RG" -n rg-autoassist --query id -o tsv)
+az role assignment create --assignee-object-id "$SP_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Foundry User" --scope "$AI_ID"
+```
+
+Name the account. The resource group holds other Foundry accounts, and taking
+"the first AIServices account in the group" can pick the wrong one.
+
+### 5. Optional: require an approval
 
 Settings → Environments → `production` → required reviewers. Every deploy then
 waits for a person. Nothing in the workflow file changes.
@@ -131,9 +155,23 @@ the whole reason images are tagged by SHA rather than only `latest`. A `latest`
 tag cannot be rolled back to, because it has already moved.
 
 The pipeline also rolls back on its own if a smoke test fails — and then
-verifies the rollback came back healthy rather than assuming it did. A rollback
-that quietly failed is worse than the original fault, because by then nobody is
+verifies the rollback with the same two checks as the smoke test: the previous
+build's SHA is what `/health` reports, and `/ready` passes. A rollback that
+quietly failed is worse than the original fault, because by then nobody is
 watching.
+
+It has fired once, on 12 September (95bc9e5). The new build came up, then
+`/ready` reported `agents not deployed: triage, diagnostics, booking,
+escalation` — the app's identity could reach the project but not list agents.
+Two things were wrong with the rollback that followed, both fixed since:
+
+- It restored the image but not `GIT_SHA`, so `/health` kept reporting the
+  failed build while the previous one ran.
+- It counted any HTTP 200 from `/health` as success. That passed in 5 seconds
+  and said nothing about whether the rolled-back app could serve. Here it could
+  not have been the code: 95bc9e5 changed only `infra/` and a doc, so the two
+  images were identical. When both builds fail `/ready`, the rollback now says
+  the fault is in Azure rather than reporting success.
 
 ## Things this does not do
 
