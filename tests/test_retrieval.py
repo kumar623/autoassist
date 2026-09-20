@@ -34,6 +34,7 @@ def azure(monkeypatch):
         return httpx.Response(200, json={"value": state["results"]})
 
     monkeypatch.setattr(retrieval, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    retrieval._SEARCHES.clear()
     return state
 
 
@@ -101,3 +102,19 @@ def test_fetch_all_reads_the_whole_index_without_a_vector(azure):
     assert len(retrieval.fetch_all(["doc_type", "content"])) == 1
     [req] = azure["seen"]
     assert json.loads(req.content) == {"search": "*", "select": "doc_type,content", "top": 1000}
+
+
+def test_the_same_question_is_searched_once(azure):
+    """An agent often searches the same thing twice in one conversation."""
+    azure["results"] = [hit(1, 0.03)]
+    first = retrieval.search("P0420")
+    second = retrieval.search(" p0420 ")
+    assert second is first
+    assert len(azure["seen"]) == 2, "one embedding, one search - not four"
+
+
+def test_a_different_question_is_searched_again(azure):
+    azure["results"] = [hit(1, 0.03)]
+    retrieval.search("P0420")
+    retrieval.search("P0300")
+    assert len(azure["seen"]) == 4
