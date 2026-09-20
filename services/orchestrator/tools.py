@@ -38,8 +38,42 @@ def search_service_docs(query: str, doc_type: str | None = None) -> str:
     return retrieval.format_for_agent(result)
 
 
+# How many times to put in front of a customer at once. The service is an hour
+# long on a fifteen-minute grid, so a free day is thirty-odd slots, and the
+# agent decides which of them to read out. On the live app on 20 Sep it read out
+# the first four: "9:00, 9:15, 9:30 and 9:45" - four times inside one hour, for
+# a job that takes an hour. An earlier run of the same question offered 09:00,
+# 10:30, 12:00, 14:00, 15:30 and 17:00, which is a useful answer. Which one the
+# customer got was luck.
+#
+# So the spread is chosen here, in code, and handed over as `offer_these`. The
+# full list stays, because the customer may name any time in it and booking
+# needs that slot's id.
+OFFER_COUNT = 6
+
+
+def spread(slots: list, count: int = OFFER_COUNT) -> list:
+    """`count` slots spaced evenly across the list, keeping the first and last."""
+    if len(slots) <= count:
+        return list(slots)
+    step = (len(slots) - 1) / (count - 1)
+    return [slots[round(i * step)] for i in range(count)]
+
+
 def get_available_slots(date: str | None = None) -> str:
-    return json.dumps(BACKEND.get_slots(on_date=date), indent=2)
+    result = BACKEND.get_slots(on_date=date)
+    slots = result.get("slots") or []
+    if len(slots) > OFFER_COUNT:
+        result["offer_these"] = spread(slots)
+        # Said in the tool's own output rather than in the agent's prompt. A
+        # tool's output is a second prompt and it wins - that is finding 7, and
+        # here it is being used deliberately rather than by accident.
+        result["how_to_offer"] = (
+            f"Read out the {OFFER_COUNT} times in offer_these, not the first few in slots: they are "
+            "spread across the day, and a run of quarter-hour starts is no use for a job that takes "
+            "an hour. If the customer names a different time, look it up in slots and book that."
+        )
+    return json.dumps(result, indent=2)
 
 
 def book_service_slot(slot_id: str, registration: str, issue: str = "", customer_name: str = "",
