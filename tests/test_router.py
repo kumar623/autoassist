@@ -244,7 +244,7 @@ def _fake_ask(delay=0.3, fail=()):
     """
     calls = []
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         calls.append((agent_name, time.time()))
         time.sleep(delay)
         if agent_name in fail:
@@ -298,7 +298,7 @@ def test_dependent_specialists_still_run_in_order(monkeypatch):
 
 def test_results_come_back_in_route_order_not_finish_order(monkeypatch):
     """Booking finishes first; the reply must still read diagnostics first."""
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         time.sleep(0.05 if agent_name == "booking" else 0.35)
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = f"answer from {agent_name}"
@@ -486,7 +486,7 @@ def test_unknown_roles_and_empty_text_are_ignored():
 def test_triage_and_booking_both_get_the_history_through_handle(monkeypatch):
     seen = {}
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         seen[agent_name] = prompt
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = '{"intents": ["booking"], "safety": false, "registration": "AP31BD1213"}' \
@@ -708,7 +708,7 @@ def test_the_warning_survives_even_if_every_answer_is_withheld_or_missing():
 
 
 def test_handle_withholds_and_records_it(monkeypatch):
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = {
             "triage": '{"intents": ["diagnostics"], "safety": true}',
@@ -765,7 +765,7 @@ def test_a_follow_up_always_goes_to_triage():
 def test_the_skipped_path_answers_without_calling_triage(monkeypatch):
     called = []
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         called.append(agent_name)
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "The catalytic converter is worn (fault code list, P0420)."
@@ -780,7 +780,7 @@ def test_the_skipped_path_answers_without_calling_triage(monkeypatch):
 
 
 def test_the_normal_path_still_reports_triage_then_the_specialist(monkeypatch):
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = '{"intents": ["diagnostics"], "safety": false}' if agent_name == "triage" else "Answer."
         return t
@@ -819,7 +819,7 @@ def test_nothing_is_streamed_without_a_listener():
 def test_handle_streams_a_single_specialist(monkeypatch):
     seen = []
 
-    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None, **_):
         for piece in ("The catalytic ", "converter is worn."):
             on_delta(piece)
         t = TurnResult(agent_name=agent_name, status="completed")
@@ -843,7 +843,7 @@ def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
     said = []
     monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
-    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None, **_):
         on_delta("Answer.")
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "Answer."
@@ -859,7 +859,7 @@ def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
     said = []
     monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = '{"intents": ["diagnostics", "booking"], "safety": false}' if agent_name == "triage" else "ok"
         return t
@@ -934,7 +934,7 @@ def test_handle_pre_searches_and_the_answer_counts_as_grounded(monkeypatch):
     monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES for " + query)
     seen = {}
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         seen[agent_name] = prompt
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "The catalytic converter is worn (fault code list, P0420)."
@@ -952,7 +952,7 @@ def test_the_status_comes_before_the_pre_search(monkeypatch):
     monkeypatch.setattr(_router.tools, "search_service_docs",
                         lambda query, doc_type=None: order.append("searched") or "2 CANDIDATES")
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "Answer."
         return t

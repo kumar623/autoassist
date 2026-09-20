@@ -24,7 +24,7 @@ def throttle(*, agents=(), retry_after=20.0):
     """A fake `ask` that is throttled for `agents` and answers for the rest."""
     called = []
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         called.append(agent_name)
         if agent_name in agents:
             raise azure_http.Throttled(429, "S0: rate limit exceeded", "POST", "https://x/runs",
@@ -75,7 +75,7 @@ def test_a_throttle_is_reported_even_when_triage_itself_answered(monkeypatch):
     "something was answered" reported no throttling on exactly the messages that
     had been throttled - and /metrics is where the decision to ask Azure for
     more quota comes from."""
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         if agent_name == "triage":
             t = TurnResult(agent_name="triage", status="completed")
             t.answer = triage_says(["diagnostics"])
@@ -142,7 +142,7 @@ def test_one_throttled_specialist_does_not_lose_the_others_answer(monkeypatch):
 
 def test_a_reply_with_nothing_in_it_at_all_is_still_the_old_apology(monkeypatch):
     """Throttling is not the only way to get no answer, and the two read differently."""
-    def broken(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def broken(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         t = TurnResult(agent_name=agent_name, status="failed")
         t.error = "run failed"
         return t
@@ -176,7 +176,7 @@ def test_azures_own_advice_is_passed_on(monkeypatch):
 
 
 def test_a_throttle_before_the_stream_opens_shows_the_busy_reply(monkeypatch):
-    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None, **_):
         raise azure_http.Throttled(429, "no quota", "POST", "https://x/runs", retry_after=20.0)
 
     written = []
@@ -192,7 +192,7 @@ def test_a_throttle_before_the_stream_opens_shows_the_busy_reply(monkeypatch):
 def test_a_half_written_answer_is_kept_and_said_to_be_half_written(monkeypatch):
     """The customer can already see it, and it was grounded. Taking it away
     would be worse than telling them it stops early."""
-    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None, **_):
         on_delta("The catalytic converter is")
         t = TurnResult(agent_name=agent_name, status="failed")
         t.answer, t.throttled, t.retry_after = "The catalytic converter is", True, 20.0

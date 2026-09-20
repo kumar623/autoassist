@@ -40,3 +40,6 @@ evals/results/
 
 # Zoho sign-in link: contains the MCP URL and its key
 .zoho-login-link
+
+# Local dev-server config for the Claude Code browser preview.
+.claude/

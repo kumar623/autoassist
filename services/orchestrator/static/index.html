@@ -35,7 +35,7 @@
   header span { color: var(--muted); font-size: 13px; }
   #status { margin-left: auto; font-size: 12px; color: var(--muted); }
   #log { flex: 1; overflow-y: auto; padding: 20px; }
-  .wrap { max-width: 760px; margin: 0 auto; }
+  .wrap { max-width: 680px; margin: 0 auto; }
   .msg { margin-bottom: 18px; display: flex; gap: 10px; }
   .msg .who {
     flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
@@ -65,7 +65,7 @@
     padding: 10px; overflow-x: auto; font-size: 12px; margin: 8px 0 0;
   }
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 20px; }
-  form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  form { max-width: 680px; margin: 0 auto; display: flex; gap: 8px; }
   input[type=text] {
     flex: 1; padding: 11px 13px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--bg); color: var(--ink); font: inherit; min-width: 0;
@@ -76,7 +76,7 @@
     background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
   }
   button:disabled { opacity: .5; cursor: default; }
-  .examples { max-width: 760px; margin: 8px auto 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .examples { max-width: 680px; margin: 8px auto 0; display: flex; gap: 6px; flex-wrap: wrap; }
   .examples button {
     background: transparent; color: var(--muted); border: 1px solid var(--line);
     font-size: 12px; padding: 4px 10px; font-weight: 400;
@@ -125,6 +125,71 @@
     background: transparent; color: var(--accent); border: 1px solid var(--line);
     font-size: 12px; padding: 4px 10px; margin-top: 6px;
   }
+
+  /* The agents panel: who is being asked, and what they are allowed to touch.
+     Beside the chat rather than under it, because the point is to watch it
+     happen - a trace you open afterwards answers a different question. */
+  #main { flex: 1; display: flex; min-height: 0; }
+  #right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #agents {
+    flex: 0 0 310px; border-right: 1px solid var(--line); background: var(--panel);
+    overflow-y: auto; padding: 14px; font-size: 13px;
+  }
+  .panel-h {
+    display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px;
+    font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  }
+  .panel-h .ms { margin-left: auto; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+  #route {
+    border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px;
+    color: var(--muted); font-size: 12px; margin-bottom: 12px; min-height: 38px;
+  }
+  #route.safety { border-color: var(--safety); border-style: solid; color: var(--safety); background: var(--safety-bg); }
+  .agent {
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px;
+    margin-bottom: 8px; background: var(--bg); transition: border-color .15s, opacity .15s;
+  }
+  .agent.skipped { opacity: .45; }
+  .agent.busy { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(31,95,139,.12); }
+  .agent.done { border-color: var(--accent); }
+  .agent.failed { border-color: var(--safety); }
+  .agent-top { display: flex; align-items: center; gap: 7px; }
+  .agent-name { font-weight: 650; font-size: 13.5px; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--line);
+    flex: 0 0 auto;
+  }
+  .agent.busy .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  .agent.done .dot { background: #2e7d32; }
+  .agent.failed .dot { background: var(--safety); }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  @media (prefers-reduced-motion: reduce) { .agent.busy .dot { animation: none } }
+  .agent-ms { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .agent-purpose { color: var(--ink); margin: 5px 0 0; font-size: 12.5px; }
+  .agent-role { color: var(--muted); margin: 3px 0 0; font-size: 11.5px; }
+  .agent-model {
+    margin-top: 6px; font-size: 11px; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+  .tool {
+    border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; font-size: 11px;
+    color: var(--muted); background: var(--panel);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .tool.running { border-color: var(--accent); color: var(--accent); animation: pulse 1s ease-in-out infinite; }
+  .tool.done { border-color: #2e7d32; color: var(--ink); animation: none; }
+  .tool.failed { border-color: var(--safety); color: var(--safety); animation: none; }
+  .tool .t-ms { opacity: .7; }
+  .no-tools { color: var(--muted); font-size: 11.5px; margin-top: 7px; font-style: italic; }
+  .panel-foot { color: var(--muted); font-size: 11.5px; margin: 10px 0 0; }
+
+  @media (max-width: 900px) {
+    #main { flex-direction: column; }
+    #agents {
+      flex: 0 0 auto; max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--line);
+    }
+  }
 </style>
 </head>
 <body>
@@ -138,6 +203,18 @@
   </nav>
   <span id="status">checking…</span>
 </header>
+
+<div id="main">
+
+<aside id="agents" aria-label="Agents">
+  <p class="panel-h">This message <span class="ms" id="turn-ms"></span></p>
+  <div id="route">Nothing running. Send a message and this shows who is asked, in what order, and every tool they call.</div>
+  <p class="panel-h">The agents</p>
+  <div id="agent-list"><p class="hint">Loading…</p></div>
+  <p class="panel-foot" id="agents-foot"></p>
+</aside>
+
+<div id="right">
 
 <div id="log">
   <div class="wrap">
@@ -181,6 +258,9 @@ Everything I say about your vehicle comes from the workshop's service documents.
   </div>
 </footer>
 
+</div><!-- #right -->
+</div><!-- #main -->
+
 <script>
 const log = document.getElementById('log').firstElementChild;
 const form = document.getElementById('f');
@@ -193,6 +273,137 @@ const status = document.getElementById('status');
 // your registration?" arrived on its own and nobody knew what it was for.
 const history = [];
 const HISTORY_SENT = 6;
+
+// ---------------------------------------------------------- the agents panel
+//
+// Read from /agents, which reads the same definition files the deploy script
+// deploys from - so the panel cannot quietly drift from what is really running.
+// Everything is set with textContent: the tool names and purposes come from
+// files, but this page also renders search results, and one careless innerHTML
+// is all it takes.
+const routeEl = document.getElementById('route');
+const agentListEl = document.getElementById('agent-list');
+const turnMsEl = document.getElementById('turn-ms');
+const agentsFootEl = document.getElementById('agents-foot');
+const cards = {};          // agent name -> {card, ms, tools: {tool name -> chip}}
+let tick = null;
+
+// el() is declared with the library code further down and hoisted to here.
+
+// A cached search really does take under a millisecond, and "0.0s" reads as
+// though nothing happened. Milliseconds below a second, seconds above it.
+function dur(ms) { return ms < 950 ? Math.max(1, Math.round(ms)) + 'ms' : (ms / 1000).toFixed(1) + 's'; }
+
+function drawAgents(agents) {
+  agentListEl.replaceChildren();
+  for (const a of agents) {
+    const card = el('div', 'agent');
+    card.dataset.agent = a.name;
+
+    const top = el('div', 'agent-top');
+    top.append(el('span', 'dot'), el('span', 'agent-name', a.name));
+    const ms = el('span', 'agent-ms', a.deployed ? '' : 'not deployed');
+    top.append(ms);
+    card.append(top, el('p', 'agent-purpose', a.purpose), el('p', 'agent-role', a.role));
+
+    const bits = [a.model];
+    if (a.temperature !== null && a.temperature !== undefined) bits.push('temperature ' + a.temperature);
+    bits.push('returns ' + a.returns);
+    card.append(el('p', 'agent-model', bits.join(' · ')));
+
+    const tools = {};
+    if (a.tools.length) {
+      const row = el('div', 'tools');
+      for (const t of a.tools) {
+        const chip = el('span', 'tool', t.name);
+        chip.title = t.does;                 // hover says what it is for
+        chip.dataset.label = t.name;
+        row.append(chip);
+        tools[t.name] = chip;
+      }
+      card.append(row);
+    } else {
+      card.append(el('p', 'no-tools', 'no tools — it only classifies'));
+    }
+
+    agentListEl.append(card);
+    cards[a.name] = {card, ms, tools};
+  }
+}
+
+function resetPanel() {
+  for (const {card, ms, tools} of Object.values(cards)) {
+    card.className = 'agent';
+    ms.textContent = '';
+    for (const chip of Object.values(tools)) {
+      chip.className = 'tool';
+      chip.textContent = chip.dataset.label;
+    }
+  }
+  routeEl.className = '';
+  routeEl.textContent = 'reading your message…';
+  const started = Date.now();
+  clearInterval(tick);
+  tick = setInterval(() => { turnMsEl.textContent = ((Date.now() - started) / 1000).toFixed(1) + 's'; }, 100);
+  return started;
+}
+
+function stopTimer(started) {
+  clearInterval(tick);
+  tick = null;
+  turnMsEl.textContent = ((Date.now() - started) / 1000).toFixed(1) + 's';
+}
+
+function onActivity(ev) {
+  if (ev.kind === 'route') {
+    const running = ev.agents || [];
+    for (const [name, c] of Object.entries(cards)) {
+      if (!running.includes(name) && !c.card.classList.contains('done')) c.card.classList.add('skipped');
+    }
+    const lines = [];
+    if (ev.cached) lines.push('Answered from the cache — no agent ran, no tokens spent.');
+    else if (!running.length) lines.push(ev.reason || 'Answered without an agent.');
+    else lines.push(running.join(' → '));
+    if (ev.safety) lines.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
+    if (ev.ticket_stands) lines.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
+    if (ev.triage_skipped) lines.push('Triage skipped: a fault code and nothing else.');
+    else if (ev.reason && running.length) lines.push(ev.reason);
+    routeEl.textContent = lines.join('  ·  ');
+    routeEl.className = ev.safety ? 'safety' : '';
+    return;
+  }
+  const c = cards[ev.agent || ev.name];
+  if (!c) return;
+  if (ev.kind === 'agent') {
+    c.card.classList.remove('skipped');
+    c.card.classList.toggle('busy', ev.state === 'working');
+    if (ev.state !== 'working') {
+      c.card.classList.add(ev.ok === false || ev.state === 'failed' ? 'failed' : 'done');
+      const parts = [];
+      if (ev.ms) parts.push(dur(ev.ms));
+      if (ev.tokens) parts.push(ev.tokens + ' tokens');
+      c.ms.textContent = parts.join(' · ');
+    }
+    return;
+  }
+  if (ev.kind === 'tool') {
+    const chip = c.tools[ev.name];
+    if (!chip) return;
+    c.card.classList.remove('skipped');
+    chip.className = 'tool ' + (ev.state === 'running' ? 'running' : (ev.failed ? 'failed' : 'done'));
+    chip.textContent = ev.state === 'running' ? chip.dataset.label
+                     : chip.dataset.label + ' ' + dur(ev.ms || 0);
+  }
+}
+
+fetch('/agents')
+  .then(r => r.json())
+  .then(j => {
+    drawAgents(j.agents || []);
+    agentsFootEl.textContent =
+      'Routing is decided in code, not by an agent calling other agents, so every step above is a value the service logged.';
+  })
+  .catch(() => { agentListEl.replaceChildren(el('p', 'hint', 'Could not load the agents.')); });
 
 function add(who, text, cls) {
   const row = document.createElement('div');
@@ -263,6 +474,7 @@ async function askServer(text) {
   const scroll = () => { log.parentElement.scrollTop = log.parentElement.scrollHeight; };
   let streamed = '';
   let done = null;
+  const startedAt = resetPanel();
 
   try {
     // The answer arrives as it is written. A specialist takes 5-8s to write one,
@@ -281,6 +493,7 @@ async function askServer(text) {
       // "Something went wrong" would be both unfriendly and untrue.
       const refused = (r.status === 429 || r.status === 503) && err.detail;
       bubble.textContent = refused ? err.detail : 'Something went wrong: ' + (err.detail || r.status);
+      routeEl.textContent = refused ? 'Refused before any agent ran.' : 'The request did not get through.';
       return;
     }
 
@@ -301,6 +514,8 @@ async function askServer(text) {
         if (ev.type === 'status') {
           working.textContent = ev.text;
           scroll();
+        } else if (ev.type === 'activity') {
+          onActivity(ev);
         } else if (ev.type === 'delta') {
           if (!streamed) { bubble.textContent = ''; bubble.classList.remove('empty'); working.remove(); }
           streamed += ev.text;
@@ -327,6 +542,7 @@ async function askServer(text) {
   } catch (e) {
     if (!streamed) { bubble.classList.remove('empty'); bubble.textContent = 'Could not reach the service. Is it running?'; }
   } finally {
+    stopTimer(startedAt);
     working.remove();
     send.disabled = false;
     box.focus();

@@ -28,7 +28,7 @@ def answering(text="The catalytic converter is worn (fault code list, P0420).", 
     import json
     called = []
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         called.append(agent_name)
         t = TurnResult(agent_name=agent_name, status=status)
         if agent_name == "triage":
