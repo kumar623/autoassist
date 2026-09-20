@@ -1,6 +1,6 @@
 .PHONY: setup data ingest reindex search agents ask lint test clean \
         agents-list triage book serve docker-build docker-run \
-        evals evals-smoke eval-one redteam
+        evals evals-smoke eval-one redteam compare-triage
 
 setup:
 	python -m venv .venv
@@ -77,3 +77,10 @@ eval-one:
 # prompt extraction. Needs Azure; ~60k tokens. Scratch stores, never live data.
 redteam:
 	python3 evals/red_team.py
+
+# Measure Jev (TypeSafe) against the triage agent we actually run, over the
+# labelled routing set. Needs Azure, and TYPESAFE_API_KEY for the Jev side -
+# without the key it reports the triage numbers and says Jev was not asked.
+# Nothing in services/ imports typesafe.py; this is a measurement, not a change.
+compare-triage:
+	python3 evals/compare_triage.py $(ARGS)

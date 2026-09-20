@@ -741,3 +741,54 @@ run. Week 3 closed with *"running the set N times and reporting a pass rate per
 case is the correct next step"*; drafts 3 and 4 are why. Draft 4 measured 4/4,
 looked finished, and then lost the warning on the next full-suite run. A change
 to a safety behaviour that has been seen to work once has not been measured.
+### 14. Triage has never been measured, and it drops diagnostics on safety messages
+
+Routing had no ground truth. Every routing expectation lived inside a
+`parametrize` list in `tests/test_router.py`, asserting what `parse_triage` does
+with a given model output — never what the model should have said in the first
+place. So "how good is triage?" had no answer.
+
+`evals/routing_set.jsonl` is 42 labelled messages: the safety cases and booking
+backstop cases lifted out of those tests, the two conversation cases from the
+golden set, and the live-app messages from 19-20 September. Each carries the
+**route** that should run, not triage's raw intents — `route()` forces escalation
+on a safety flag and maps `other` to diagnostics, so labelling intents would
+have measured our own inconsistency instead of the model's. Getting that wrong
+the first time cost four wrong "failures" before the labels were corrected.
+
+First run, 20 September, `make compare-triage`:
+
+| | |
+|---|---|
+| Route exactly right | **24/42** |
+| Safety caught | **14/14** — recall 1.0 |
+| Safety false alarms | **5** — precision 0.737 |
+| Cost | 2,170ms median, 604 tokens per message |
+
+Recall of 1.0 is the number that matters and it is the right way round: the net
+has never missed a safety issue in this set. The failures fall into three groups.
+
+**Diagnostics is dropped on safety messages (9 cases).** "airbag light is on",
+"smoke coming from the bonnet", "my seat belt will not retract" and six others
+route to `["escalation"]` alone. The customer is handed to a human without being
+told what is wrong, even though `_compose` is built to put an escalation notice
+*above* a diagnostics explanation on a safety route. This had never been visible
+because no test asserts the route for a safety message — only that escalation is
+in it.
+
+**Five false alarms, all in the same direction.** Two are the documented keyword
+trade-off ("how often should brake fluid be changed"). Three are triage's own
+judgement: a gearbox complaint, "is it safe to drive with it?" about a
+medium-severity code, and a booking request whose *previous* turn was about
+brakes — the sticking flag that raised three tickets for one car (finding 11's
+sibling, fixed in code on 20 September).
+
+**Multi-intent is dropped (4 cases).** "book at 2 pm , viper blades" routes to
+booking alone; "my brakes are grinding, can I come in tomorrow" loses diagnostics.
+The booking keyword backstop exists because of the first one and catches the
+booking half — nothing catches the diagnostics half.
+
+None of this is fixed yet. It is written down because a number you can point at
+is worth more than an impression, and because the same file is the baseline for
+the next question: whether a classifier with calibrated probabilities does better
+than a chat model asked for JSON. See `evals/compare_triage.py`.
