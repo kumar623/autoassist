@@ -620,7 +620,7 @@ the next message. Measured on a two-turn conversation, twice out of twice:
 | Turn 1 | "Do not drive the vehicle…" lands in the reply, and so in the history |
 | Turn 2 | triage reads that history and flags the new message as a safety issue — `safety_source=triage`, though `_triage_input` tells it to judge the flag on the new message alone |
 | | a safety flag forces `escalation` onto the route, so escalation runs and calls `raise_ticket`: a fault code question raises a ticket for a human |
-| | `_withhold_reassurance` then drops the diagnostics answer, because it says the car is safe to drive with care — so the customer is left with the ticket and no explanation |
+| | `_withhold_reassurance` then drops the diagnostics answer on one of the two runs, because it says the car is safe to drive with care — so the customer is left with the ticket and no explanation |
 | | `_can_stream` refuses to stream a safety-flagged turn, so it is slower as well |
 
 One wrong sentence, and the rest of the system did exactly what it was built to
@@ -642,9 +642,9 @@ was itself the fix for losing the search call.
 
 ## Three drafts that each broke something else
 
-Every draft was measured before it was believed — the two behaviours that have
-to hold at the same time are *"P0420 must not warn"* and *"a smell of petrol
-must warn"*, and only one draft in four held both.
+Every draft was measured before it was believed. Two behaviours have to hold at
+the same time — *"P0420 must not warn"* and *"a smell of petrol must warn"* —
+and only the last of five held both on every run.
 
 | Draft | P0420 quiet | petrol warns | petrol searched |
 |---|---|---|---|
@@ -656,9 +656,10 @@ must warn"*, and only one draft in four held both.
 | 5. **shipped** — 4, plus the safety systems named in the tool's own closing block | **11/11** | **11/11** | **11/11** |
 
 Draft 5 was then run end to end as well: three more P0420 replies through the
-router and three more straight to the agent, with no warning in any of them, the two-turn conversation no longer
-flagged or ticketed, and "my brakes have stopped working" and "there is a smell
-of petrol" still warned, escalated and raised a safety ticket, 4 for 4.
+router and three more straight to the agent, none of them warning; the two-turn
+conversation no longer flagged, escalated or ticketed; and "my brakes have
+stopped working" and "there is a smell of petrol" still warned, escalated and
+raised a safety ticket, four times out of four.
 
 Draft 1 is finding 9 coming straight back: told that the document's severity
 line is the answer, the model applied that to a *symptom* as well, found the
@@ -717,9 +718,11 @@ where the judgement is made, and measured rather than assumed.
 it?" after a P0420 answer: `prefetch_documents` searches the library for the
 literal follow-up text, finds nothing about P0420, and the agent is told not to
 search again — so the follow-up is answered with no P0420 document at all, and
-says the library does not cover the code. It failed the same way before this
-change. The fix belongs with the pre-search, not the prompt: a follow-up needs
-the fault code from the conversation in its query.
+says the library does not cover the code. It failed before this change too, from
+the same cause — it reported a missing citation then and a withheld answer now,
+because triage flags that message as a safety issue on about 2 runs in 3. The
+fix belongs with the pre-search, not the prompt: a follow-up needs the fault
+code from the conversation in its query.
 
 **The "costs the customer nothing" sentence is still in the prompt.** It is
 false as written, and it is also the tilt that makes an uncertain symptom get a
