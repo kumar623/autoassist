@@ -110,6 +110,78 @@ text and find the document it came from.
 
 ---
 
+## Too busy: refusals, throttling and the cache
+
+Three different things look like "it is slow or it is not answering", and they
+have three different answers. Start with `/metrics` - but read the caveat at the
+bottom of this section first.
+
+```bash
+curl -s "$URL/metrics" | jq '{requests, refused, throttled, cache_hits,
+                              failures, in_flight, in_flight_peak, in_flight_limit,
+                              refused_rate, refused_busy}'
+```
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `refused_rate` climbing | one visitor, or a script, is over 10 a minute or 60 an hour | see the query below - one visitor or many? |
+| `refused_busy` climbing | the replica is full (20 in flight) | it should be scaling out; check replica count |
+| `throttled` climbing | Azure's token quota is spent | ask for more quota, or wait it out |
+| `cache_hits` near 0 in a demo | nobody is repeating a question, or the replica is cold | expected after a scale to zero |
+
+**Is it one visitor or a crowd?** A refused message never reaches the router, so
+it has no `chat.request` span. It has this one:
+
+```kql
+dependencies
+| where timestamp > ago(1h)
+| where name == "chat.refused"
+| summarize refusals = count() by visitor = tostring(customDimensions["autoassist.visitor"]),
+                                  reason = tostring(customDimensions["autoassist.reason"])
+| order by refusals desc
+```
+
+One digest with hundreds of refusals is a script: leave the limit where it is.
+Many digests with a few each means the limit is too tight for real use - raise
+`RATE_LIMIT_PER_MINUTE` rather than removing it. The digest is a hash, not an
+address; it is stable per visitor so the rows can be grouped.
+
+**How often is the quota running out?**
+
+```kql
+dependencies
+| where timestamp > ago(24h)
+| where name == "chat.request"
+| summarize total = count(), busy = countif(tobool(customDimensions["autoassist.throttled"]) == true)
+| extend pct = round(100.0 * busy / total, 1)
+```
+
+Anything above zero for more than a burst means 100,000 tokens a minute is not
+enough for the traffic. Raise the quota in the Azure OpenAI resource; nothing in
+the code will fix it. The service logs `throttled, giving up` with Azure's own
+wording, which is kept out of the customer's trace on purpose.
+
+**How much is the cache saving?**
+
+```kql
+dependencies
+| where timestamp > ago(24h)
+| where name == "chat.request"
+| summarize total = count(), cached = countif(tobool(customDimensions["autoassist.cached"]) == true)
+| extend saved_tokens = cached * 7000
+```
+
+A cache hit still reports `searched = true`, because the answer was grounded when
+it was written - so the ungrounded-answer query above is unaffected by it.
+
+**The caveat.** All of these counters are per replica and `/metrics` answers for
+whichever replica the ingress picked, so two curls a second apart can disagree.
+The KQL queries do not have this problem: use them for anything that matters.
+Setting `RATE_LIMIT_PER_MINUTE` to a number based on one `/metrics` read is how
+a limit gets raised for the wrong reason.
+
+---
+
 ## Latency
 
 Where does the time actually go?
@@ -270,7 +342,9 @@ safe, but it should not be happening.
 | Safety not escalated | any safety request without escalation in 1h | a routing bug |
 | p95 latency | > 40s over 15 min | roughly double baseline |
 | Failure rate | > 5% of requests in 15 min | |
-| AOAI throttling | any 429 in 5 min | quota exhausted; requests are failing |
+| AOAI throttling | any 429 in 5 min | quota exhausted; customers are told we are busy |
+| Refusing visitors | `chat.refused` rising over 15 min | a script, or the limit is too tight - group by visitor first |
+| Replica full | `refused_busy` > 0 | check it scaled out; the cap is 20, ingress adds a replica past 10 |
 | Not ready | `/ready` failing 5 min | deployment or Azure problem |
 
 ---
@@ -294,6 +368,17 @@ actually has.
 **Everything is slow, tool calls are fast.** The time is in the model, not in
 us. Check Azure OpenAI quota and for 429s. Sequential agents are the design; see
 README limitations.
+
+**Customers are told we are busy, but traffic is low.** Check `throttled` before
+`refused`. Being throttled is Azure's quota, not our limit, and our limit does
+not cause it. If both are zero and people still see the busy reply, look for a
+throttle on a *different* deployment sharing the quota.
+
+**"It answered instantly and skipped the agents."** That is the answer cache
+doing its job; the trace opens with a `cache` entry saying how old the answer is.
+It only ever holds plain fault-code answers - never a booking, an escalation or
+anything safety-flagged. To turn it off in the live app:
+`az containerapp update -g "$RG" -n "$APP" --set-env-vars ANSWER_CACHE_SECONDS=0`.
 
 **Bookings vanished.** The store is `data/bookings.json` inside the container.
 Container restarts lose it. That is a known limitation, not a bug — Table

@@ -40,3 +40,47 @@ def test_it_cannot_grow_without_limit():
     for i in range(400):
         c.get_or_call(i, lambda n=i: n)
     assert len(c._values) <= 256
+
+
+# get/put, for values that are only worth keeping once they exist - a whole
+# answer is cached only if it turns out to be the kind that is the same for
+# everyone, which is not known until it has been written.
+
+
+def test_a_missing_value_is_none():
+    assert TimedCache(60).get("never stored") is None
+
+
+def test_what_was_put_comes_back():
+    c = TimedCache(60)
+    c.put("what does p0420 mean", "the catalytic converter is worn")
+    assert c.get("what does p0420 mean") == "the catalytic converter is worn"
+
+
+def test_a_stale_put_value_is_gone():
+    c = TimedCache(0.05)
+    c.put("k", "old")
+    time.sleep(0.06)
+    assert c.get("k") is None
+
+
+def test_putting_again_replaces():
+    c = TimedCache(60)
+    c.put("k", "first")
+    c.put("k", "second")
+    assert c.get("k") == "second"
+
+
+def test_hits_and_misses_are_counted_for_both_ways_in():
+    c = TimedCache(60)
+    c.get("k")
+    c.put("k", "v")
+    c.get("k")
+    assert (c.hits, c.misses) == (1, 1)
+
+
+def test_put_cannot_grow_without_limit():
+    c = TimedCache(60)
+    for i in range(400):
+        c.put(i, i)
+    assert len(c._values) <= 256

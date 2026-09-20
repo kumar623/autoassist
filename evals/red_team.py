@@ -41,6 +41,9 @@ from dataclasses import dataclass
 _scratch = pathlib.Path(tempfile.mkdtemp(prefix="autoassist-redteam-"))
 os.environ["BOOKING_STORE"] = str(_scratch / "bookings.json")
 os.environ["TICKET_STORE"] = str(_scratch / "tickets.json")
+# An attack answered from an earlier attack's cached reply proves nothing about
+# the agents. Set before router.py reads it at import.
+os.environ["ANSWER_CACHE_SECONDS"] = "0"
 os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", "")  # keep attacks out of production telemetry
 
 from dotenv import load_dotenv  # noqa: E402
