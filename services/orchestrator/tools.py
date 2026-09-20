@@ -15,9 +15,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Callable
 
-from . import booking, retrieval
+from . import booking, retrieval, zoho_bookings
+
+# Which calendar bookings live in. "zoho" puts them in the workshop's real Zoho
+# Bookings calendar, which also emails the customer; "file" is the JSON file in
+# the container, which is lost on every deploy. Both offer the same functions,
+# so every rule above them - the registration check, one booking per vehicle per
+# day, safe moves - works either way.
+BACKEND = zoho_bookings if os.getenv("BOOKING_BACKEND", "file").lower() == "zoho" else booking
 
 log = logging.getLogger(__name__)
 
@@ -31,23 +39,25 @@ def search_service_docs(query: str, doc_type: str | None = None) -> str:
 
 
 def get_available_slots(date: str | None = None) -> str:
-    return json.dumps(booking.get_slots(on_date=date), indent=2)
+    return json.dumps(BACKEND.get_slots(on_date=date), indent=2)
 
 
-def book_service_slot(slot_id: str, registration: str, issue: str = "") -> str:
-    return json.dumps(booking.book_slot(slot_id, registration, issue), indent=2)
+def book_service_slot(slot_id: str, registration: str, issue: str = "", customer_name: str = "",
+                      customer_email: str = "", customer_phone: str = "") -> str:
+    customer = {"name": customer_name, "email": customer_email, "phone": customer_phone}
+    return json.dumps(BACKEND.book_slot(slot_id, registration, issue, customer), indent=2)
 
 
 def move_service_booking(reference: str, new_slot_id: str, registration: str) -> str:
-    return json.dumps(booking.move_booking(reference, new_slot_id, registration), indent=2)
+    return json.dumps(BACKEND.move_booking(reference, new_slot_id, registration), indent=2)
 
 
 def cancel_service_booking(reference: str, registration: str) -> str:
-    return json.dumps(booking.cancel_booking(reference, registration), indent=2)
+    return json.dumps(BACKEND.cancel_booking(reference, registration), indent=2)
 
 
 def look_up_booking(reference: str, registration: str) -> str:
-    return json.dumps(booking.get_booking(reference, registration), indent=2)
+    return json.dumps(BACKEND.get_booking(reference, registration), indent=2)
 
 
 def raise_ticket(summary: str, urgency: str = "normal", registration: str = "") -> str:
@@ -139,8 +149,22 @@ SCHEMAS: dict[str, dict] = {
                 "type": "string",
                 "description": "Short description of what needs looking at.",
             },
+            "customer_name": {
+                "type": "string",
+                "description": "The customer's name, for the appointment. Ask for it.",
+            },
+            "customer_email": {
+                "type": "string",
+                "description": "The customer's email address. The workshop's calendar emails the "
+                "confirmation there, so the booking cannot be made without it.",
+            },
+            "customer_phone": {
+                "type": "string",
+                "description": "The customer's phone number, so the workshop can call about the "
+                "appointment. The calendar refuses a booking without one.",
+            },
         },
-        ["slot_id", "registration"],
+        ["slot_id", "registration", "customer_name", "customer_email", "customer_phone"],
     ),
     "move_service_booking": _tool(
         "move_service_booking",

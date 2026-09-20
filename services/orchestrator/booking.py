@@ -141,8 +141,12 @@ def _parse_date(text: str, today: date) -> date | None:
     return None
 
 
-def book_slot(slot_id: str, registration: str, issue: str) -> dict:
-    """Reserve a slot. The ONLY way a booking comes into existence."""
+def book_slot(slot_id: str, registration: str, issue: str, customer: dict | None = None) -> dict:
+    """Reserve a slot. The ONLY way a booking comes into existence.
+
+    `customer` (name, email, phone) is ignored here and used by the Zoho
+    backend, so tools.py can call either one the same way.
+    """
     if not slot_id or not registration:
         return {"ok": False, "error": "slot_id and registration are both required."}
 
