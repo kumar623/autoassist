@@ -44,6 +44,7 @@ def zoho(monkeypatch):
     monkeypatch.setattr(z, "SERVICE_ID", "273103000000034065")
     monkeypatch.setattr(z, "STAFF_ID", "273103000000034009")
     monkeypatch.setattr(z, "REGISTRATION_FIELD", "Vehicle Registration")
+    z._AVAILABILITY.clear()
     return state
 
 
@@ -259,3 +260,33 @@ def test_the_zoho_backend_says_who_was_emailed(zoho):
     zoho["answers"]["bookAppointment"] = APPOINTMENT
     r = z.book_slot(SLOT, "AP31BP2133", "service", CUSTOMER)
     assert "emailed k@example.com" in r["message"]
+
+
+def test_availability_for_a_day_is_asked_once(zoho):
+    """The booking agent asked Zoho twice in one reply, at 1.2s each."""
+    zoho["answers"]["getAvailability"] = {"data": ["10:30 AM"]}
+    z.get_slots(on_date=TOMORROW.isoformat())
+    z.get_slots(on_date=TOMORROW.isoformat())
+    assert len(sent(zoho, "getAvailability")) == 1
+
+
+@pytest.mark.parametrize("change", ["book", "move", "cancel"])
+def test_any_change_to_the_calendar_forgets_what_was_cached(zoho, change):
+    """A slot that has just gone must never still look free."""
+    zoho["answers"]["getAvailability"] = {"data": ["10:30 AM", "02:15 PM"]}
+    zoho["answers"]["fetchAppointment"] = {"response": "No Match Found"}
+    zoho["answers"]["getAppointment"] = APPOINTMENT
+    zoho["answers"]["bookAppointment"] = APPOINTMENT
+    zoho["answers"]["rescheduleAppointment"] = {**APPOINTMENT, "start_time": f"{DAY_ZOHO} 14:15:00"}
+    zoho["answers"]["updateAppointmentStatus"] = {**APPOINTMENT, "status": "cancel"}
+    z.get_slots(on_date=TOMORROW.isoformat())
+
+    if change == "book":
+        z.book_slot(SLOT, "AP31XX0000", "service", CUSTOMER)
+    elif change == "move":
+        z.move_booking("#TE-00002", f"{TOMORROW.isoformat()}-1415", "AP31BP2133")
+    else:
+        z.cancel_booking("#TE-00002", "AP31BP2133")
+
+    z.get_slots(on_date=TOMORROW.isoformat())
+    assert len(sent(zoho, "getAvailability")) == 2, "the calendar was read again after it changed"

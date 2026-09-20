@@ -57,6 +57,7 @@ from datetime import date, datetime, timedelta
 from functools import lru_cache
 
 from .booking import _parse_date  # one date parser for both backends
+from .cache import TimedCache
 from .mcp_client import McpClient, McpError
 from .zoho_auth import ZohoAuth
 
@@ -75,6 +76,12 @@ _REGISTRATION_IN_NOTES = re.compile(r"vehicle registration:\s*([A-Z0-9]+)", re.I
 
 _DAY = "%d-%b-%Y"
 _MOMENT = "%d-%b-%Y %H:%M:%S"
+
+
+# The booking agent asked Zoho for the same day's availability twice inside one
+# reply (1.2s each, measured 20 Sep). Cleared the moment anything is booked,
+# moved or cancelled, so a slot that has just gone never looks free.
+_AVAILABILITY = TimedCache(float(os.getenv("ZOHO_CACHE_SECONDS", "60")), "zoho-availability")
 
 
 class ZohoUnavailable(Exception):
@@ -164,6 +171,10 @@ def _not_found(reference: str, registration: str) -> dict:
 
 
 def _slots_on(day: date) -> list[dict]:
+    return _AVAILABILITY.get_or_call(("slots", day), lambda: _slots_on_now(day))
+
+
+def _slots_on_now(day: date) -> list[dict]:
     result = _call("getAvailability", {"query_params": {
         "service_id": SERVICE_ID, "selected_date": day.strftime(_DAY),
         **({"staff_id": STAFF_ID} if STAFF_ID else {}),
@@ -199,10 +210,11 @@ def get_slots(on_date: str | None = None, days: int = 3) -> dict:
         # No date given: the next few days that have anything free. One call
         # asks Zoho which days are open at all, so only those are looked up.
         ahead = [today + timedelta(days=n) for n in range(1, SEARCH_DAYS + 1)]
-        open_days = _call("fetchAvailability_or_getRecentAppointment", {"body": {"data": json.dumps({
+        open_days = _AVAILABILITY.get_or_call(("open-days", today), lambda: _call(
+            "fetchAvailability_or_getRecentAppointment", {"body": {"data": json.dumps({
             "action": "FETCH_AVAILABILITY", "service_id": SERVICE_ID,
             "date_list": [d.strftime(_DAY) for d in ahead],
-        })}})
+        })}}))
         slots: list[dict] = []
         found_days = 0
         for d in ahead:
@@ -279,6 +291,7 @@ def book_slot(slot_id: str, registration: str, issue: str, customer: dict | None
     if refused:
         return {"ok": False, "error": f"Zoho did not accept the booking: {refused}"}
 
+    _AVAILABILITY.clear()  # that slot is gone now
     booked = _appointment(result)
     return {"ok": True, "reference": booked["reference"], "date": booked["date"], "day": booked["day"],
             "time": booked["time"], "registration": reg,
@@ -340,6 +353,7 @@ def move_booking(reference: str, new_slot_id: str, registration: str) -> dict:
     if refused:
         return {"ok": False, "error": f"That time could not be taken: {refused}. Booking {reference} is unchanged "
                                       f"and still at {booked['date']} {booked['time']}."}
+    _AVAILABILITY.clear()  # one slot freed, another taken
     moved = _appointment(result.get("response") if isinstance(result.get("response"), dict) else result)
     was = f"{booked['date']} {booked['time']}"
     return {"ok": True, "reference": booked["reference"], "date": moved["date"] or booked["date"],
@@ -361,5 +375,6 @@ def cancel_booking(reference: str, registration: str) -> dict:
     refused = _failed(result)
     if refused:
         return {"ok": False, "error": f"Zoho did not cancel it: {refused}"}
+    _AVAILABILITY.clear()  # that slot is free again
     return {"ok": True, "reference": booked["reference"],
             "message": f"Booking {booked['reference']} cancelled. Zoho has emailed the customer."}

@@ -33,6 +33,7 @@ from functools import lru_cache
 import httpx
 
 from . import azure_http
+from .cache import TimedCache
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,12 @@ SEARCH_API_VERSION = os.getenv("SEARCH_API_VERSION", "2026-04-01")  # what azure
 DOC_TYPES = ("dtc", "maintenance", "bulletin")
 
 RESULT_FIELDS = ["id", "title", "content", "doc_type", "source_file", "section", "page", "severity"]
+
+# The index changes only when someone runs ingest, so the same question has the
+# same answer for a while. Worth having because an agent often searches the same
+# thing twice in one conversation, and each search is an embedding plus a query
+# (~0.7s). Short enough that a re-ingest shows up quickly.
+_SEARCHES = TimedCache(float(os.getenv("RETRIEVAL_CACHE_SECONDS", "120")), "retrieval")
 
 # Tuning. Defaults chosen by hand in week 2; week 3 measures them properly
 # against evals/golden_set.jsonl before anyone claims they are right.
@@ -167,6 +174,13 @@ def search(
         # without the filter. Never pasted into the filter as written.
         raise ValueError(f"doc_type must be one of {', '.join(DOC_TYPES)}, or left out; got {doc_type!r}")
 
+    return _SEARCHES.get_or_call(
+        (query.strip().lower(), doc_type, top_k, floor, max_per_source),
+        lambda: _search_now(query, top_k, doc_type, floor, max_per_source),
+    )
+
+
+def _search_now(query, top_k, doc_type, floor, max_per_source) -> RetrievalResult:
     result = RetrievalResult(query=query)
     want = top_k * CANDIDATE_MULTIPLIER
 

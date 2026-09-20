@@ -334,7 +334,7 @@ def test_prompts_are_built_before_any_thread_starts(monkeypatch):
     """
     seen = []
 
-    def spy(specialist, message, decision, so_far, history=None):
+    def spy(specialist, message, decision, so_far, history=None, prefetched=None):
         seen.append((specialist, len(so_far)))
         return f"prompt for {specialist}"
 
@@ -352,7 +352,7 @@ def test_prompts_are_built_before_any_thread_starts(monkeypatch):
 def test_escalation_sees_what_the_earlier_wave_said(monkeypatch):
     seen = {}
 
-    def spy(specialist, message, decision, so_far, history=None):
+    def spy(specialist, message, decision, so_far, history=None, prefetched=None):
         seen[specialist] = [t.agent_name for t in so_far]
         return f"prompt for {specialist}"
 
@@ -839,11 +839,11 @@ def test_small_talk_is_sent_to_the_listener_too(monkeypatch):
 
 
 def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
-    """An agent searches before it writes, so the first words can be 5s away."""
+    """An agent searches before it writes, so the first words can be seconds away."""
     said = []
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
     def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
-        on_status("looking in the service documents")
         on_delta("Answer.")
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "Answer."
@@ -857,6 +857,7 @@ def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
 
 def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
     said = []
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
     def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
         t = TurnResult(agent_name=agent_name, status="completed")
@@ -865,4 +866,91 @@ def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
 
     monkeypatch.setattr(_router, "ask", ask)
     _router.handle(None, "P0420 and can I book tomorrow", agent_ids={"triage": "t", **IDS}, on_status=said.append)
-    assert said == ["reading your message", "checking the service documents and checking the workshop calendar"]
+    assert said == ["reading your message",
+                    "checking the service documents and checking the workshop calendar",
+                    "looking in the service documents"]
+
+
+# ---------------------------------------------------------------- searching before the agent
+#
+# A fault code IS the search. Letting the agent discover that cost 2.5s of it
+# deciding to call the tool before writing a word (measured on the live app).
+
+
+from services.orchestrator.router import _record_prefetch, prefetch_documents  # noqa: E402
+
+
+def test_a_fault_code_is_searched_before_the_agent_runs(monkeypatch):
+    asked = []
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: asked.append(query) or "2 CANDIDATES")
+    found = prefetch_documents("what does P0420 mean and is P0300 related?")
+    assert found is not None
+    query, output, ms = found
+    assert query == "P0420 P0300", "every code in the message, once each"
+    assert output == "2 CANDIDATES" and ms >= 0
+
+
+def test_a_message_without_a_fault_code_is_left_to_the_agent(monkeypatch):
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda **kw: pytest.fail("should not search"))
+    assert prefetch_documents("my clutch is slipping") is None
+
+
+def test_a_failed_pre_search_does_not_stop_the_answer(monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("search is down")
+
+    monkeypatch.setattr(_router.tools, "search_service_docs", boom)
+    assert prefetch_documents("what does P0420 mean") is None, "the agent searches itself instead"
+
+
+def test_the_documents_are_handed_to_diagnostics_not_to_booking():
+    prefetched = ("P0420", "2 CANDIDATE document(s) ...", 700)
+    d = _context_for("diagnostics", "what does P0420 mean", _decision(["diagnostics"]), [], None, prefetched)
+    assert "already been searched" in d and "2 CANDIDATE document(s)" in d
+    assert "do not call it again" in d
+    b = _context_for("booking", "book me in", _decision(["booking"]), [], None, prefetched)
+    assert "already been searched" not in b
+
+
+def test_the_pre_search_appears_in_the_trace_as_a_search():
+    """Otherwise the answer looks ungrounded - finding 1, and what the evals check."""
+    turns = [TurnResult(agent_name="diagnostics", status="completed"), TurnResult(agent_name="booking", status="completed")]
+    _record_prefetch(turns, ("P0420", "2 CANDIDATES", 712))
+    assert turns[0].searched
+    assert turns[0].tool_calls[0].name == "search_service_docs"
+    assert turns[0].tool_calls[0].arguments == {"query": "P0420", "run_before_the_agent": True}
+    assert turns[0].tool_calls[0].duration_ms == 712
+    assert not turns[1].searched, "booking did not search"
+
+
+def test_handle_pre_searches_and_the_answer_counts_as_grounded(monkeypatch):
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES for " + query)
+    seen = {}
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        seen[agent_name] = prompt
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = "The catalytic converter is worn (fault code list, P0420)."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS})
+    assert "2 CANDIDATES for P0420" in seen["diagnostics"]
+    assert r.searched, "the trace shows the search that really happened"
+
+
+def test_the_status_comes_before_the_pre_search(monkeypatch):
+    """The pre-search takes ~0.7s; saying nothing during it wastes the gain."""
+    order = []
+    monkeypatch.setattr(_router.tools, "search_service_docs",
+                        lambda query, doc_type=None: order.append("searched") or "2 CANDIDATES")
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = "Answer."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS},
+                   on_status=lambda text: order.append(text))
+    assert order == ["checking the service documents", "looking in the service documents", "searched"]

@@ -32,9 +32,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 
-from . import telemetry
+from . import telemetry, tools
 from .foundry import FoundryAgents
-from .runner import TurnResult, ask, ask_streaming
+from .runner import ToolCallRecord, TurnResult, ask, ask_streaming
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +117,30 @@ BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule
 # needed to see that. Deliberately narrow: any hint of a booking, a safety issue
 # or a conversation in progress goes to triage as before.
 FAULT_CODE = re.compile(r"\b[PBCU][0-9]{4}\b", re.IGNORECASE)
+
+
+def prefetch_documents(message: str) -> tuple[str, str, int] | None:
+    """Search the library before the agent runs, when we already know the query.
+
+    A fault code IS the search. Letting the agent discover that costs 2.5s of it
+    deciding to call the tool, plus the call itself, before a word is written
+    (measured 20 Sep). Searching first and handing over the documents removes
+    that round entirely.
+
+    The search really happens, and is recorded as the tool call it is, so the
+    trace, the `searched` flag and the eval that checks it stay honest.
+    """
+    codes = FAULT_CODE.findall(message)
+    if not codes:
+        return None
+    query = " ".join(dict.fromkeys(c.upper() for c in codes))
+    started = time.time()
+    try:
+        output = tools.search_service_docs(query=query)
+    except Exception as e:  # noqa: BLE001 - never block an answer on an optimisation
+        log.warning("pre-search failed, the agent will search itself: %s", e)
+        return None
+    return query, output, int((time.time() - started) * 1000)
 
 
 def fast_route(message: str, history: list[dict] | None) -> TriageDecision | None:
@@ -319,6 +343,7 @@ def _context_for(
     decision: TriageDecision,
     so_far: list[TurnResult],
     history: list[dict] | None = None,
+    prefetched: tuple[str, str, int] | None = None,
 ) -> str:
     """What we actually send the specialist: the message plus anything useful."""
     parts = []
@@ -347,6 +372,20 @@ def _context_for(
             )
 
     parts.append(f"Customer message: {message}")
+
+    # The library has already been searched for the fault code in the message.
+    # Handed over here rather than fetched by the agent, which saves the round
+    # trip it would spend deciding to call the tool. Every rule about reading
+    # the results still applies, which is why the tool's own wording is passed
+    # through untouched.
+    if prefetched and specialist == "diagnostics":
+        query, output, _ = prefetched
+        parts.append(
+            f"The service library has already been searched for you, for '{query}'. These are the "
+            f"results, exactly as search_service_docs returns them. Use them as if you had called "
+            f"it yourself, and do not call it again for this question - only for something else the "
+            f"customer asked that these do not cover.\n\n{output}"
+        )
 
     # Booking turns "Monday 21 September" into YYYY-MM-DD itself, and without a
     # date it guessed the year: 2020, from its training. The slot lookup then
@@ -442,6 +481,7 @@ def _run_specialists(
     decision: TriageDecision,
     timeout: float,
     history: list[dict] | None = None,
+    prefetched: tuple[str, str, int] | None = None,
 ) -> list[TurnResult]:
     """Run the route, concurrently where the dependencies allow it.
 
@@ -456,7 +496,7 @@ def _run_specialists(
     for wave in waves:
         if len(wave) == 1:
             specialist = wave[0]
-            prompt = _context_for(specialist, message, decision, results, history)
+            prompt = _context_for(specialist, message, decision, results, history, prefetched)
             turn = ask(client, ids[specialist], prompt, timeout=timeout, agent_name=specialist)
             results.append(turn)
             if not turn.ok:
@@ -468,7 +508,7 @@ def _run_specialists(
         # results list, and if one thread appended to it while another was
         # reading, the prompts would depend on timing - the same request could
         # produce different prompts on different runs.
-        prompts = {s: _context_for(s, message, decision, results, history) for s in wave}
+        prompts = {s: _context_for(s, message, decision, results, history, prefetched) for s in wave}
 
         with telemetry.span("specialists.parallel", agents=wave, count=len(wave)):
             with ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="specialist") as pool:
@@ -544,6 +584,22 @@ def _withhold_reassurance(turns: list[TurnResult], decision: TriageDecision) -> 
             t.error = "withheld: reassured the customer on a safety-flagged message"
             withheld.append(t.agent_name)
     return withheld
+
+
+def _record_prefetch(turns: list[TurnResult], prefetched: tuple[str, str, int]) -> None:
+    """Put the pre-search in the trace as what it is: a search we ran.
+
+    Without this the diagnostics turn would look like an answer with no search
+    behind it - which is finding 1, the worst failure this system has, and the
+    thing the eval suite checks for.
+    """
+    query, output, ms = prefetched
+    for t in turns:
+        if t.agent_name == "diagnostics":
+            t.tool_calls.insert(0, ToolCallRecord(
+                name="search_service_docs", arguments={"query": query, "run_before_the_agent": True},
+                output_preview=output[:300], duration_ms=ms))
+            return
 
 
 def _can_stream(on_delta, route: list[str], decision: TriageDecision) -> bool:
@@ -720,17 +776,29 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     route = [s for s in decision.route() if s in ids]
     before = len(out.turns)  # triage's turn, or nothing when triage was skipped
 
+    # Tell them what is happening BEFORE the pre-search: it takes ~0.7s, and
+    # that is 0.7s of silence if the status waits for it.
     if on_status and route:
         on_status(" and ".join(AGENT_STATUS.get(s, s) for s in route))
 
+    # Only worth doing when diagnostics is going to run.
+    prefetched = None
+    if "diagnostics" in route:
+        if on_status:
+            on_status("looking in the service documents")
+        prefetched = prefetch_documents(message)
+
     if _can_stream(on_delta, route, decision):
         specialist = route[0]
-        prompt = _context_for(specialist, message, decision, [], history)
+        prompt = _context_for(specialist, message, decision, [], history, prefetched)
         out.turns.append(ask_streaming(client, ids[specialist], prompt, on_delta,
                                        timeout=timeout, agent_name=specialist, on_status=on_status))
     else:
-        out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history))
+        out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history, prefetched))
     specialists = out.turns[before:]
+
+    if prefetched:
+        _record_prefetch(specialists, prefetched)
 
     # --- 3. check, then compose ---
     out.withheld = _withhold_reassurance(specialists, decision)
