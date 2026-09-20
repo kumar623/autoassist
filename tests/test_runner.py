@@ -184,3 +184,81 @@ def test_the_thread_is_deleted_even_when_the_run_blows_up():
     with pytest.raises(RuntimeError):
         runner.ask(c, "asst_1", "q")
     assert c.deleted == [], "there is no thread to delete: the one call that makes it also failed"
+
+
+# ---------------------------------------------------------------- streaming
+#
+# The customer waited 5-8s for an answer they could not see being written
+# (measured on the live app, 20 Sep). Streaming shows it as it arrives.
+
+
+class FakeStreamingFoundry(FakeFoundry):
+    """Replays SSE-style events, and starts a second stream after tool outputs."""
+
+    def __init__(self, first, after_tools=None, answer="Streamed answer."):
+        super().__init__([run("completed")], answer=answer)
+        self.first = first
+        self.after_tools = after_tools or []
+        self.streams = 0
+
+    def stream_thread_and_run(self, agent_id, content):
+        self.messages.append(content)
+        self.streams += 1
+        return iter(self.first)
+
+    def stream_tool_outputs(self, thread_id, run_id, outputs):
+        self.submitted.append(outputs)
+        self.streams += 1
+        return iter(self.after_tools)
+
+
+def created(run_id="run_1", thread_id="thread_1"):
+    return ("thread.run.created", {"id": run_id, "thread_id": thread_id, "status": "queued"})
+
+
+def delta(text):
+    return ("thread.message.delta", {"delta": {"content": [{"index": 0, "type": "text", "text": {"value": text}}]}})
+
+
+def completed(prompt=100, completion=20):
+    return ("thread.run.completed", {"id": "run_1", "status": "completed",
+                                     "usage": {"prompt_tokens": prompt, "completion_tokens": completion}})
+
+
+def test_the_answer_arrives_in_fragments():
+    seen = []
+    c = FakeStreamingFoundry([created(), delta("The catalytic "), delta("converter is worn."), completed()])
+    t = runner.ask_streaming(c, "asst_1", "what does P0420 mean", seen.append, agent_name="diagnostics")
+    assert seen == ["The catalytic ", "converter is worn."], "the customer reads it as it is written"
+    assert t.answer == "The catalytic converter is worn."
+    assert t.ok and (t.prompt_tokens, t.completion_tokens) == (100, 20)
+    assert c.deleted == ["thread_1"], "the thread is still cleaned up"
+
+
+def test_tools_run_mid_stream_and_the_answer_continues():
+    c = FakeStreamingFoundry(
+        [created(), ("thread.run.requires_action", {
+            "id": "run_1", "status": "requires_action", "required_action": {
+                "type": "submit_tool_outputs", "submit_tool_outputs": {"tool_calls": [
+                    {"id": "call_0", "type": "function", "function": {"name": "get_available_slots", "arguments": "{}"}}]}}})],
+        after_tools=[delta("Here are some times."), completed()])
+    seen = []
+    t = runner.ask_streaming(c, "asst_1", "any slots?", seen.append, agent_name="booking")
+    assert [call.name for call in t.tool_calls] == ["get_available_slots"]
+    assert json.loads(c.submitted[0][0]["output"])["ok"] is True
+    assert "".join(seen) == "Here are some times."
+    assert c.streams == 2, "submitting the tool output continues the same run"
+
+
+def test_a_failed_run_while_streaming_is_reported():
+    c = FakeStreamingFoundry([created(), ("thread.run.failed", {
+        "id": "run_1", "status": "failed", "last_error": {"code": "rate_limit_exceeded", "message": "quota"}})])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert not t.ok and t.error == "rate_limit_exceeded: quota"
+
+
+def test_a_stream_that_stops_early_is_not_reported_as_success():
+    c = FakeStreamingFoundry([created(), delta("half an ans")])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert not t.ok
+    assert "did not finish" in t.error or "without finishing" in t.error

@@ -34,7 +34,7 @@ from datetime import date
 
 from . import telemetry
 from .foundry import FoundryAgents
-from .runner import TurnResult, ask
+from .runner import TurnResult, ask, ask_streaming
 
 log = logging.getLogger(__name__)
 
@@ -546,6 +546,17 @@ def _withhold_reassurance(turns: list[TurnResult], decision: TriageDecision) -> 
     return withheld
 
 
+def _can_stream(on_delta, route: list[str], decision: TriageDecision) -> bool:
+    """Whether this answer may be shown as it is written.
+
+    Never on a safety-flagged message: _withhold_reassurance can only judge a
+    finished answer, and a streamed one is already on the customer's screen.
+    Never with several specialists either - their answers are joined in route
+    order, so the first one to write is not necessarily the first to read.
+    """
+    return bool(on_delta) and len(route) == 1 and not decision.safety
+
+
 def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
     """Join the specialists' answers into one reply.
 
@@ -582,8 +593,13 @@ def handle(
     timeout: float = 90.0,
     agent_ids: dict[str, str] | None = None,
     history: list[dict] | None = None,
+    on_delta=None,
+    on_status=None,
 ) -> RouterResult:
     """Handle one customer message end to end.
+
+    `on_delta(text)` is optional. Given one, a single specialist's answer is
+    streamed as it is written, which is what the customer sees first.
 
     `history` is the recent conversation as [{"role": "customer"|"assistant",
     "text": ...}], oldest first. Optional: without it, behaviour is exactly the
@@ -597,11 +613,13 @@ def handle(
     ) as req_span:
         canned = small_talk_reply(message)
         if canned:
+            if on_delta:
+                on_delta(canned)
             out.reply = canned
             out.decision = TriageDecision(intents=["other"], reason="small talk, answered without agents")
             out.duration_ms = int((time.time() - started) * 1000)
         else:
-            _handle_inner(client, message, timeout, agent_ids, out, started, history)
+            _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta, on_status)
         d = out.decision
         telemetry.set(
             req_span,
@@ -627,6 +645,8 @@ def _handle_inner(
     out: RouterResult,
     started: float,
     history: list[dict] | None = None,
+    on_delta=None,
+    on_status=None,
 ) -> None:
     ids = agent_ids or _agent_ids(client)
 
@@ -641,9 +661,11 @@ def _handle_inner(
     decision = fast_route(message, history)
     if decision is not None:
         log.info("triage skipped: %s", decision.reason)
-        _route_and_answer(client, ids, message, decision, timeout, history, out, started)
+        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta, on_status)
         return
 
+    if on_status:
+        on_status("reading your message")
     triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout, agent_name="triage")
     out.turns.append(triage_turn)
 
@@ -678,17 +700,36 @@ def _handle_inner(
             has_date=bool(decision.date),
         )
 
-    _route_and_answer(client, ids, message, decision, timeout, history, out, started)
+    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta, on_status)
 
 
-def _route_and_answer(client, ids, message, decision, timeout, history, out, started) -> None:
+# What each specialist is about to do, in the customer's words.
+AGENT_STATUS = {
+    "diagnostics": "checking the service documents",
+    "booking": "checking the workshop calendar",
+    "escalation": "arranging for a service advisor to call you",
+}
+
+
+def _route_and_answer(client, ids, message, decision, timeout, history, out, started,
+                      on_delta=None, on_status=None) -> None:
     """Run the specialists the decision calls for, then compose the reply."""
     out.decision = decision
 
     # --- 2. specialists ---
     route = [s for s in decision.route() if s in ids]
     before = len(out.turns)  # triage's turn, or nothing when triage was skipped
-    out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history))
+
+    if on_status and route:
+        on_status(" and ".join(AGENT_STATUS.get(s, s) for s in route))
+
+    if _can_stream(on_delta, route, decision):
+        specialist = route[0]
+        prompt = _context_for(specialist, message, decision, [], history)
+        out.turns.append(ask_streaming(client, ids[specialist], prompt, on_delta,
+                                       timeout=timeout, agent_name=specialist, on_status=on_status))
+    else:
+        out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history))
     specialists = out.turns[before:]
 
     # --- 3. check, then compose ---

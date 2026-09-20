@@ -789,3 +789,80 @@ def test_the_normal_path_still_reports_triage_then_the_specialist(monkeypatch):
     r = _router.handle(None, "my car makes a noise", agent_ids={"triage": "t", **IDS})
     assert r.agents_used == ["triage", "diagnostics"]
     assert r.reply == "Answer.", "the triage JSON must not reach the customer"
+
+
+# ---------------------------------------------------------------- what may be streamed
+
+
+from services.orchestrator.router import _can_stream  # noqa: E402
+
+
+def test_one_specialist_may_be_streamed():
+    assert _can_stream(lambda text: None, ["diagnostics"], _decision(["diagnostics"]))
+
+
+def test_a_safety_answer_is_never_streamed():
+    """_withhold_reassurance can only judge a finished answer; a streamed one is
+    already on the customer's screen (red team, finding 11)."""
+    assert not _can_stream(lambda text: None, ["diagnostics"], _decision(["diagnostics"], safety=True))
+
+
+def test_several_specialists_are_not_streamed():
+    """Their answers are joined in route order, not in the order they finish."""
+    assert not _can_stream(lambda text: None, ["diagnostics", "booking"], _decision(["diagnostics", "booking"]))
+
+
+def test_nothing_is_streamed_without_a_listener():
+    assert not _can_stream(None, ["diagnostics"], _decision(["diagnostics"]))
+
+
+def test_handle_streams_a_single_specialist(monkeypatch):
+    seen = []
+
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+        for piece in ("The catalytic ", "converter is worn."):
+            on_delta(piece)
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = "The catalytic converter is worn."
+        return t
+
+    monkeypatch.setattr(_router, "ask_streaming", ask_streaming)
+    monkeypatch.setattr(_router, "ask", lambda *a, **k: pytest.fail("the polling path was used"))
+    r = _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS}, on_delta=seen.append)
+    assert "".join(seen) == r.reply == "The catalytic converter is worn."
+
+
+def test_small_talk_is_sent_to_the_listener_too(monkeypatch):
+    seen = []
+    r = _router.handle(None, "hi", agent_ids={}, on_delta=seen.append)
+    assert seen == [r.reply]
+
+
+def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
+    """An agent searches before it writes, so the first words can be 5s away."""
+    said = []
+
+    def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
+        on_status("looking in the service documents")
+        on_delta("Answer.")
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = "Answer."
+        return t
+
+    monkeypatch.setattr(_router, "ask_streaming", ask_streaming)
+    _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS},
+                   on_delta=lambda t: None, on_status=said.append)
+    assert said == ["checking the service documents", "looking in the service documents"]
+
+
+def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
+    said = []
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = '{"intents": ["diagnostics", "booking"], "safety": false}' if agent_name == "triage" else "ok"
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    _router.handle(None, "P0420 and can I book tomorrow", agent_ids={"triage": "t", **IDS}, on_status=said.append)
+    assert said == ["reading your message", "checking the service documents and checking the workshop calendar"]
