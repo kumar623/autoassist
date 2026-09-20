@@ -270,3 +270,13 @@ def test_a_stranger_cannot_move_a_booking():
     other = next(x for x in booking.get_slots(days=2)["slots"] if x["slot_id"] != s["slot_id"])
     assert not booking.move_booking(ref, other["slot_id"], "AP31XX0000")["ok"]
     assert booking.get_booking(ref, "AP31ZZ9999")["slot_id"] == s["slot_id"]
+
+
+def test_the_file_backend_never_claims_an_email_was_sent():
+    """Live app, 20 Sep: the agent said 'a confirmation email is on its way'
+    after a file-backend booking, which sends none. The agent takes its cue
+    from this message, so the message must not imply one."""
+    s = first_slot()
+    r = booking.book_slot(s["slot_id"], "AP31AB1234", "service")
+    assert r["ok"]
+    assert "email" not in r["message"].lower()

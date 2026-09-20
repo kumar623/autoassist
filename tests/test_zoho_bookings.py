@@ -251,3 +251,11 @@ def test_the_custom_field_is_read_even_when_a_move_wiped_the_notes(zoho):
     zoho["answers"]["getAppointment"] = {**APPOINTMENT, "notes": "",
                                          "customer_more_info": {"Vehicle Registration": "AP31BP2133"}}
     assert z.get_booking("#TE-00002", "AP31BP2133")["ok"]
+
+
+def test_the_zoho_backend_says_who_was_emailed(zoho):
+    """Zoho does send one, so the agent may say so - and only then."""
+    zoho["answers"]["fetchAppointment"] = {"response": "No Match Found"}
+    zoho["answers"]["bookAppointment"] = APPOINTMENT
+    r = z.book_slot(SLOT, "AP31BP2133", "service", CUSTOMER)
+    assert "emailed k@example.com" in r["message"]
