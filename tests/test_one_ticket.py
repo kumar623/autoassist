@@ -31,7 +31,7 @@ def agents(intents=("diagnostics", "escalation"), safety=True):
     """Fake agents that record who was asked."""
     called = []
 
-    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
         called.append(agent_name)
         t = TurnResult(agent_name=agent_name, status="completed")
         if agent_name == "triage":

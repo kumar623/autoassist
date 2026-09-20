@@ -34,7 +34,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import library, limits, telemetry
+from . import library, limits, roster, telemetry
 from . import router as routing
 from .foundry import FoundryAgents
 
@@ -290,6 +290,7 @@ def chat_stream(req: ChatRequest, request: Request):
     anything is most of what makes the app feel slow. The events:
 
         {"type": "status", "text": "..."}  what is happening while they wait
+        {"type": "activity", "kind": ...}  for the agent panel: route, agent, tool
         {"type": "delta", "text": "..."}   a fragment of the answer
         {"type": "done",  ...}             the whole ChatResponse, with the trace
         {"type": "error", "detail": "..."}
@@ -317,6 +318,9 @@ def chat_stream(req: ChatRequest, request: Request):
                 client, req.message.strip(), timeout=REQUEST_TIMEOUT, agent_ids=STATE["agent_ids"],
                 history=[h.model_dump() for h in req.history],
                 on_delta=fragments.put, on_status=lambda text: fragments.put(("status", text)),
+                # Called from inside the agent threads, several at once when the
+                # specialists run in parallel. Queue.put is what makes that safe.
+                on_event=lambda event: fragments.put(("activity", event)),
             )
             fragments.put(("done", result))
         except Exception as e:  # noqa: BLE001
@@ -342,6 +346,11 @@ def chat_stream(req: ChatRequest, request: Request):
                 if kind == "status":
                     yield _sse({"type": "status", "text": payload})
                     continue
+                if kind == "activity":
+                    # What the panel beside the chat draws: which agent is
+                    # working, which tool it just called, how long it took.
+                    yield _sse({"type": "activity", **payload})
+                    continue
                 if kind == "error":
                     METRICS["failures"] += 1
                     yield _sse({"type": "error", "detail": payload})
@@ -366,6 +375,16 @@ def chat_stream(req: ChatRequest, request: Request):
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
+
+
+@app.get("/agents")
+def agent_roster() -> dict:
+    """The four agents, what each is for, and which tools each may call.
+
+    Read from the definitions the deploy script uses, so the panel beside the
+    chat cannot drift from what is actually deployed.
+    """
+    return roster.load(STATE.get("agent_ids"))
 
 
 @app.get("/library")

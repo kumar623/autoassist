@@ -107,6 +107,20 @@ class TurnResult:
         return ", ".join(f"{c.name}({c.duration_ms}ms)" for c in self.tool_calls)
 
 
+def emit(on_event, **event) -> None:
+    """Tell the page something happened, if anyone is listening.
+
+    Never raises. This exists to draw a panel; a request must not fail because
+    the drawing went wrong, and it is called from inside the agent threads.
+    """
+    if on_event is None:
+        return
+    try:
+        on_event(event)
+    except Exception:  # noqa: BLE001
+        log.debug("could not report %s", event.get("kind"), exc_info=True)
+
+
 def _status_of(run: dict) -> str:
     return str(run.get("status") or "").lower()
 
@@ -125,6 +139,7 @@ def run_turn(
     max_tool_rounds: int = 8,
     agent_name: str = "",
     run: dict | None = None,
+    on_event=None,
 ) -> TurnResult:
     """Run one turn on a thread that already has the user message.
 
@@ -135,7 +150,8 @@ def run_turn(
     out = TurnResult(thread_id=thread_id, agent_name=agent_name)
 
     with telemetry.span("agent.turn", agent=agent_name, thread_id=thread_id) as turn_span:
-        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out, started, run)
+        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out,
+                        started, run, on_event)
         telemetry.set(
             turn_span,
             run_id=out.run_id,
@@ -161,6 +177,7 @@ def _run_turn_inner(
     out: TurnResult,
     started: float,
     run: dict | None = None,
+    on_event=None,
 ) -> None:
     run = run or client.create_run(thread_id, agent_id)
     run_id = run["id"]
@@ -225,10 +242,13 @@ def _run_turn_inner(
                 name = call["function"]["name"]
                 raw_args = call["function"].get("arguments") or ""
 
+                emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
                 with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
                     t0 = time.time()
                     result = tools.execute(name, raw_args)
                     ms = int((time.time() - t0) * 1000)
+                    emit(on_event, kind="tool", agent=agent_name, name=name, state="done",
+                         ms=ms, failed=result.startswith("ERROR:"))
                     telemetry.set(
                         ts,
                         duration_ms=ms,
@@ -288,17 +308,31 @@ def ask(
     question: str,
     timeout: float = 90.0,
     agent_name: str = "",
+    on_event=None,
 ) -> TurnResult:
     """One question, one fresh thread.
 
     A fresh thread every time is not tidiness. Reusing a thread lets the model
     answer from chunks already in its history instead of searching again, which
     silently invalidates any test you run that way (finding 3).
+
+    `on_event(dict)` is optional and is how the page shows what is happening
+    while it happens: which agent is working, which tool it just called, how
+    long it took. It may be called from several threads at once - the specialists
+    run concurrently - so whatever is behind it has to cope with that.
     """
+    emit(on_event, kind="agent", name=agent_name, state="working")
     run = client.create_thread_and_run(agent_id, question)
     thread_id = run.get("thread_id", "")
     try:
-        return run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name, run=run)
+        turn = run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name,
+                        run=run, on_event=on_event)
+        emit(on_event, kind="agent", name=agent_name, state="done", ms=turn.duration_ms,
+             tokens=turn.prompt_tokens + turn.completion_tokens, ok=turn.ok)
+        return turn
+    except BaseException:
+        emit(on_event, kind="agent", name=agent_name, state="failed")
+        raise
     finally:
         if thread_id:
             _CLEANUP.submit(_delete_thread, client, thread_id)
@@ -344,6 +378,7 @@ def ask_streaming(
     timeout: float = 90.0,
     agent_name: str = "",
     on_status=None,
+    on_event=None,
 ) -> TurnResult:
     """One question, one fresh thread, with the answer delivered as it is written.
 
@@ -357,10 +392,13 @@ def ask_streaming(
     started = time.time()
     out = TurnResult(agent_name=agent_name)
 
+    emit(on_event, kind="agent", name=agent_name, state="working")
     with telemetry.span("agent.turn", agent=agent_name, streamed=True) as turn_span:
         try:
-            _stream_turn(client, agent_id, question, on_delta, timeout, out, started, on_status)
+            _stream_turn(client, agent_id, question, on_delta, timeout, out, started, on_status, on_event)
         finally:
+            emit(on_event, kind="agent", name=agent_name, state="done" if out.status else "failed",
+                 ms=out.duration_ms, tokens=out.prompt_tokens + out.completion_tokens, ok=out.ok)
             telemetry.set(
                 turn_span,
                 run_id=out.run_id,
@@ -392,10 +430,11 @@ TOOL_STATUS = {
 }
 
 
-def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float, on_status=None) -> None:
+def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float,
+                 on_status=None, on_event=None) -> None:
     answer: list[str] = []
     try:
-        _stream_events(client, agent_id, question, on_delta, timeout, out, started, on_status, answer)
+        _stream_events(client, agent_id, question, on_delta, timeout, out, started, on_status, answer, on_event)
     except azure_http.Throttled as e:
         # Mid-answer throttling: the run started, so some of the answer may
         # already be on the customer's screen. Whatever arrived is kept - it is
@@ -412,7 +451,7 @@ def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult,
 
 
 def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float,
-                   on_status, answer: list[str]) -> None:
+                   on_status, answer: list[str], on_event=None) -> None:
     events = client.stream_thread_and_run(agent_id, question)
     rounds = 0
 
@@ -443,7 +482,7 @@ def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResul
                         said = TOOL_STATUS.get((call.get("function") or {}).get("name", ""))
                         if said:
                             on_status(said)
-                outputs = _run_requested_tools(data, out, agent_name=out.agent_name)
+                outputs = _run_requested_tools(data, out, agent_name=out.agent_name, on_event=on_event)
                 if outputs is None:  # an action we do not handle
                     out.status = "requires_action"
                     out.error = "run needs an action we do not handle"
@@ -466,7 +505,7 @@ def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResul
         events = next_events
 
 
-def _run_requested_tools(run: dict, out: TurnResult, agent_name: str) -> list[dict] | None:
+def _run_requested_tools(run: dict, out: TurnResult, agent_name: str, on_event=None) -> list[dict] | None:
     """Execute the tools a run asked for, recording each one. Shared shape with
     the polling loop: same records, same spans, same error strings."""
     action = run.get("required_action") or {}
@@ -481,10 +520,13 @@ def _run_requested_tools(run: dict, out: TurnResult, agent_name: str) -> list[di
         name = call["function"]["name"]
         raw_args = call["function"].get("arguments") or ""
 
+        emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
         with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
             t0 = time.time()
             result = tools.execute(name, raw_args)
             ms = int((time.time() - t0) * 1000)
+            emit(on_event, kind="tool", agent=agent_name, name=name, state="done",
+                 ms=ms, failed=result.startswith("ERROR:"))
             telemetry.set(ts, duration_ms=ms, failed=result.startswith("ERROR:"),
                           args=raw_args[:500] if raw_args else "", result_head=result[:200])
 

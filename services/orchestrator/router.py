@@ -35,7 +35,7 @@ from datetime import date
 from . import azure_http, limits, telemetry, tools
 from .cache import TimedCache
 from .foundry import FoundryAgents
-from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, throttled_turn
+from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, emit, throttled_turn
 
 log = logging.getLogger(__name__)
 
@@ -670,6 +670,7 @@ def _run_specialists(
     timeout: float,
     history: list[dict] | None = None,
     prefetched: tuple[str, str, int] | None = None,
+    on_event=None,
 ) -> list[TurnResult]:
     """Run the route, concurrently where the dependencies allow it.
 
@@ -686,7 +687,8 @@ def _run_specialists(
             specialist = wave[0]
             prompt = _context_for(specialist, message, decision, results, history, prefetched)
             try:
-                turn = ask(client, ids[specialist], prompt, timeout=timeout, agent_name=specialist)
+                turn = ask(client, ids[specialist], prompt, timeout=timeout,
+                           agent_name=specialist, on_event=on_event)
             except azure_http.Throttled as e:
                 turn = throttled_turn(specialist, e)
             results.append(turn)
@@ -705,7 +707,8 @@ def _run_specialists(
             with ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="specialist") as pool:
                 futures = {
                     pool.submit(
-                        ask, client, ids[s], prompts[s], timeout=timeout, agent_name=s
+                        ask, client, ids[s], prompts[s], timeout=timeout, agent_name=s,
+                        on_event=on_event,
                     ): s
                     for s in wave
                 }
@@ -868,6 +871,7 @@ def handle(
     history: list[dict] | None = None,
     on_delta=None,
     on_status=None,
+    on_event=None,
 ) -> RouterResult:
     """Handle one customer message end to end.
 
@@ -888,11 +892,13 @@ def handle(
         if canned:
             if on_delta:
                 on_delta(canned)
+            emit(on_event, kind="route", agents=[], reason="small talk, answered without agents")
             out.reply = canned
             out.decision = TriageDecision(intents=["other"], reason="small talk, answered without agents")
             out.duration_ms = int((time.time() - started) * 1000)
         else:
-            _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta, on_status)
+            _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta,
+                          on_status, on_event)
         d = out.decision
         telemetry.set(
             req_span,
@@ -922,6 +928,7 @@ def _handle_inner(
     history: list[dict] | None = None,
     on_delta=None,
     on_status=None,
+    on_event=None,
 ) -> None:
     ids = agent_ids or _agent_ids(client)
 
@@ -940,20 +947,22 @@ def _handle_inner(
         found = ANSWERS.get(key)
         if found:
             log.info("answered from the cache: %r", key[:80])
-            _serve_cached(found, out, started, on_delta)
+            _serve_cached(found, out, started, on_delta, on_event)
             return
 
     # --- 1. triage, unless the message speaks for itself ---
     decision = fast_route(message, history)
     if decision is not None:
         log.info("triage skipped: %s", decision.reason)
-        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta, on_status)
+        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
+                          on_status, on_event)
         return
 
     if on_status:
         on_status("reading your message")
     try:
-        triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout, agent_name="triage")
+        triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout,
+                          agent_name="triage", on_event=on_event)
     except azure_http.Throttled as e:
         triage_turn = throttled_turn("triage", e)
     out.turns.append(triage_turn)
@@ -1009,7 +1018,8 @@ def _handle_inner(
             has_date=bool(decision.date),
         )
 
-    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta, on_status)
+    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
+                      on_status, on_event)
 
 
 # What each specialist is about to do, in the customer's words.
@@ -1021,7 +1031,7 @@ AGENT_STATUS = {
 
 
 def _route_and_answer(client, ids, message, decision, timeout, history, out, started,
-                      on_delta=None, on_status=None) -> None:
+                      on_delta=None, on_status=None, on_event=None) -> None:
     """Run the specialists the decision calls for, then compose the reply."""
     out.decision = decision
 
@@ -1042,25 +1052,36 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     if on_status and route:
         on_status(" and ".join(AGENT_STATUS.get(s, s) for s in route))
 
+    emit(on_event, kind="route", agents=route, safety=decision.safety,
+         safety_source=decision.safety_source, reason=decision.reason,
+         triage_skipped=decision.triage_skipped, ticket_stands=standing)
+
     # Whenever diagnostics is going to run - not only for fault codes.
     prefetched = None
     if "diagnostics" in route:
         if on_status:
             on_status("looking in the service documents")
+        # The pre-search is a real search and shows in the panel as one, under
+        # the agent it was run for - the same claim _record_prefetch makes in
+        # the trace, made at the time rather than afterwards.
+        emit(on_event, kind="tool", agent="diagnostics", name="search_service_docs", state="running")
         prefetched = prefetch_documents(message)
+        emit(on_event, kind="tool", agent="diagnostics", name="search_service_docs", state="done",
+             ms=prefetched[2] if prefetched else 0, failed=prefetched is None)
 
     if _can_stream(on_delta, route, decision):
         specialist = route[0]
         prompt = _context_for(specialist, message, decision, [], history, prefetched)
         try:
-            turn = ask_streaming(client, ids[specialist], prompt, on_delta,
-                                 timeout=timeout, agent_name=specialist, on_status=on_status)
+            turn = ask_streaming(client, ids[specialist], prompt, on_delta, timeout=timeout,
+                                 agent_name=specialist, on_status=on_status, on_event=on_event)
         except azure_http.Throttled as e:
             # Raised before the stream opened, so nothing has been shown yet.
             turn = throttled_turn(specialist, e)
         out.turns.append(turn)
     else:
-        out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history, prefetched))
+        out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history,
+                                         prefetched, on_event))
     specialists = out.turns[before:]
 
     if prefetched:
@@ -1114,7 +1135,8 @@ def _note_throttling(specialists: list[TurnResult], out: RouterResult) -> None:
     out.throttled = not any(t.answer.strip() for t in specialists)
 
 
-def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_delta=None) -> None:
+def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_delta=None,
+                  on_event=None) -> None:
     """Hand back an answer someone else's question already paid for.
 
     The decision is rebuilt rather than stored, because worth_caching only ever
@@ -1124,6 +1146,8 @@ def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_del
     out.cached_from = found
     out.reply = found.reply
     out.decision = TriageDecision(intents=["diagnostics"], reason="answered from the cache")
+    emit(on_event, kind="route", agents=[], cached=True,
+         reason="an identical question was already answered; no agent ran")
     if on_delta:
         on_delta(found.reply)  # in one piece: there is nothing to wait for
     out.duration_ms = int((time.time() - started) * 1000)
