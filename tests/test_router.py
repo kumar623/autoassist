@@ -722,3 +722,70 @@ def test_handle_withholds_and_records_it(monkeypatch):
     assert r.withheld == ["diagnostics"]
     assert "safe to keep driving" not in r.reply
     assert r.reply.startswith("Do not drive")
+
+
+# ---------------------------------------------------------------- skipping triage
+#
+# Triage cost 2.0-2.7s of every reply on the live app (20 Sep) just to classify
+# the message. A fault code on its own does not need classifying.
+
+from services.orchestrator.router import fast_route  # noqa: E402
+
+
+@pytest.mark.parametrize("message", [
+    "what does P0420 mean",
+    "P0300",
+    "what is b0010?",
+    "my car shows U0100, what is that",
+])
+def test_a_fault_code_on_its_own_skips_triage(message):
+    d = fast_route(message, None)
+    assert d is not None and d.triage_skipped
+    assert d.route() == ["diagnostics"]
+
+
+@pytest.mark.parametrize("message", [
+    "P0420 is showing, can I book in for Saturday?",   # booking too
+    "my brakes feel spongy",                            # safety, and no code
+    "B0010 airbag light is on",                         # safety word present
+    "what slots are free tomorrow",                     # booking
+    "hi how are you",                                   # small talk
+    "my car makes a noise when I brake",                # symptom, needs triage
+])
+def test_anything_less_obvious_still_goes_to_triage(message):
+    assert fast_route(message, None) is None
+
+
+def test_a_follow_up_always_goes_to_triage():
+    """'P0420' after a booking question means something different."""
+    history = [{"role": "assistant", "text": "What is your registration?"}]
+    assert fast_route("P0420", history) is None
+
+
+def test_the_skipped_path_answers_without_calling_triage(monkeypatch):
+    called = []
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        called.append(agent_name)
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = "The catalytic converter is worn (fault code list, P0420)."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS})
+    assert called == ["diagnostics"], "triage was not asked"
+    assert r.agents_used == ["diagnostics"]
+    assert r.decision.triage_skipped
+    assert "catalytic converter" in r.reply
+
+
+def test_the_normal_path_still_reports_triage_then_the_specialist(monkeypatch):
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = '{"intents": ["diagnostics"], "safety": false}' if agent_name == "triage" else "Answer."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "my car makes a noise", agent_ids={"triage": "t", **IDS})
+    assert r.agents_used == ["triage", "diagnostics"]
+    assert r.reply == "Answer.", "the triage JSON must not reach the customer"

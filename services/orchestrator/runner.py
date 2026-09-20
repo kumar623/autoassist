@@ -119,13 +119,18 @@ def run_turn(
     timeout: float = 90.0,
     max_tool_rounds: int = 8,
     agent_name: str = "",
+    run: dict | None = None,
 ) -> TurnResult:
-    """Run one turn on an existing thread that already has the user message."""
+    """Run one turn on a thread that already has the user message.
+
+    `run` is a run already started elsewhere - see ask(), which starts it in the
+    same call that creates the thread.
+    """
     started = time.time()
     out = TurnResult(thread_id=thread_id, agent_name=agent_name)
 
     with telemetry.span("agent.turn", agent=agent_name, thread_id=thread_id) as turn_span:
-        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out, started)
+        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out, started, run)
         telemetry.set(
             turn_span,
             run_id=out.run_id,
@@ -150,8 +155,9 @@ def _run_turn_inner(
     agent_name: str,
     out: TurnResult,
     started: float,
+    run: dict | None = None,
 ) -> None:
-    run = client.create_run(thread_id, agent_id)
+    run = run or client.create_run(thread_id, agent_id)
     run_id = run["id"]
     out.run_id = run_id
 
@@ -284,12 +290,13 @@ def ask(
     answer from chunks already in its history instead of searching again, which
     silently invalidates any test you run that way (finding 3).
     """
-    thread_id = client.create_thread()["id"]
+    run = client.create_thread_and_run(agent_id, question)
+    thread_id = run.get("thread_id", "")
     try:
-        client.create_message(thread_id, question)
-        return run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name)
+        return run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name, run=run)
     finally:
-        _CLEANUP.submit(_delete_thread, client, thread_id)
+        if thread_id:
+            _CLEANUP.submit(_delete_thread, client, thread_id)
 
 
 def _delete_thread(client: FoundryAgents, thread_id: str) -> None:
