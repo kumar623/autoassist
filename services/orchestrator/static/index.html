@@ -126,68 +126,103 @@
     font-size: 12px; padding: 4px 10px; margin-top: 6px;
   }
 
-  /* The agents panel: who is being asked, and what they are allowed to touch.
-     Beside the chat rather than under it, because the point is to watch it
-     happen - a trace you open afterwards answers a different question. */
+  /* The agents panel: who is being asked, what they may touch, and what they
+     are doing right now. A ring rather than a list, because the shape of the
+     run is the thing worth seeing: triage first, the specialists together,
+     then one reply. A trace you open afterwards answers a different question. */
   #main { flex: 1; display: flex; min-height: 0; }
   #right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #agents {
-    flex: 0 0 310px; border-right: 1px solid var(--line); background: var(--panel);
-    overflow-y: auto; padding: 14px; font-size: 13px;
+    flex: 0 0 360px; border-right: 1px solid var(--line); background: var(--panel);
+    overflow-y: auto; padding: 10px 12px 16px; font-size: 13px;
   }
   .panel-h {
-    display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px;
-    font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    display: flex; align-items: baseline; gap: 8px; margin: 10px 0 4px;
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
   }
   .panel-h .ms { margin-left: auto; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+
+  /* the ring */
+  #ring { width: 100%; height: auto; display: block; }
+  .ring-track { fill: none; stroke: var(--line); stroke-width: 7; }
+  .ring-fill {
+    fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round;
+    transform: rotate(-90deg); transform-origin: 180px 170px;
+    transition: stroke-dashoffset .45s ease;
+  }
+  .ring-fill.safety { stroke: var(--safety); }
+  .pct { fill: var(--ink); font-size: 40px; font-weight: 700; text-anchor: middle; }
+  .pct-sign { font-size: 17px; fill: var(--muted); font-weight: 600; }
+  .ring-sub { fill: var(--muted); font-size: 12px; text-anchor: middle; }
+
+  .edge { fill: none; stroke: var(--line); stroke-width: 1.6; stroke-dasharray: 2 4; }
+  .edge.taken { stroke: var(--accent); stroke-dasharray: none; stroke-width: 2; marker-end: url(#arrow); }
+  .edge.taken.safety { stroke: var(--safety); marker-end: url(#arrow-safety); }
+
+  .node-ring { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
+  .node-icon { font-size: 22px; text-anchor: middle; }
+  .node-label { fill: var(--muted); font-size: 11.5px; font-weight: 650; }
+  .node-ms { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .node { cursor: default; }
+  .node.skipped { opacity: .3; }
+  .node.busy .node-ring { stroke: var(--accent); stroke-width: 2.5; animation: breathe 1.1s ease-in-out infinite; }
+  .node.busy .node-label { fill: var(--accent); }
+  .node.done .node-ring { stroke: #2e7d32; stroke-width: 2; }
+  .node.done .node-label { fill: var(--ink); }
+  .node.failed .node-ring { stroke: var(--safety); stroke-width: 2; }
+  .node.failed .node-label { fill: var(--safety); }
+  @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  @media (prefers-reduced-motion: reduce) { .node.busy .node-ring { animation: none } }
+
   #route {
-    border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px;
-    color: var(--muted); font-size: 12px; margin-bottom: 12px; min-height: 38px;
+    border: 1px dashed var(--line); border-radius: 8px; padding: 7px 9px;
+    color: var(--muted); font-size: 11.5px; min-height: 34px; margin: 0;
   }
   #route.safety { border-color: var(--safety); border-style: solid; color: var(--safety); background: var(--safety-bg); }
-  .agent {
-    border: 1px solid var(--line); border-radius: 10px; padding: 10px 11px;
-    margin-bottom: 8px; background: var(--bg); transition: border-color .15s, opacity .15s;
+
+  /* what it actually did, line by line */
+  #steps { list-style: none; margin: 0; padding: 0; font-size: 11.5px; }
+  #steps li {
+    display: flex; gap: 7px; align-items: baseline; padding: 3px 0;
+    border-bottom: 1px solid var(--line);
   }
-  .agent.skipped { opacity: .45; }
-  .agent.busy { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(31,95,139,.12); }
-  .agent.done { border-color: var(--accent); }
-  .agent.failed { border-color: var(--safety); }
-  .agent-top { display: flex; align-items: center; gap: 7px; }
-  .agent-name { font-weight: 650; font-size: 13.5px; }
-  .dot {
-    width: 8px; height: 8px; border-radius: 50%; background: var(--line);
-    flex: 0 0 auto;
+  #steps li:last-child { border-bottom: 0; }
+  #steps .who { color: var(--muted); flex: 0 0 74px; }
+  #steps .what {
+    flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .agent.busy .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
-  .agent.done .dot { background: #2e7d32; }
-  .agent.failed .dot { background: var(--safety); }
-  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
-  @media (prefers-reduced-motion: reduce) { .agent.busy .dot { animation: none } }
-  .agent-ms { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .agent-purpose { color: var(--ink); margin: 5px 0 0; font-size: 12.5px; }
-  .agent-role { color: var(--muted); margin: 3px 0 0; font-size: 11.5px; }
+  #steps .t { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #steps li.running .what { color: var(--accent); }
+  #steps li.failed .what { color: var(--safety); }
+  #steps .none { color: var(--muted); font-style: italic; }
+
+  /* the reference list: who they are and what they may call */
+  .agent-ref { border-top: 1px solid var(--line); padding: 8px 0 0; margin-top: 4px; }
+  .agent-ref summary { font-size: 12px; }
+  .agent-card { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .agent-card:last-child { border-bottom: 0; }
+  .agent-card h4 { margin: 0; font-size: 12.5px; display: flex; align-items: baseline; gap: 6px; }
+  .agent-card h4 .not-live { color: var(--safety); font-size: 11px; font-weight: 400; margin-left: auto; }
+  .agent-purpose { color: var(--ink); margin: 3px 0 0; font-size: 12px; }
+  .agent-role { color: var(--muted); margin: 2px 0 0; font-size: 11px; }
   .agent-model {
-    margin-top: 6px; font-size: 11px; color: var(--muted);
+    margin: 4px 0 0; font-size: 10.5px; color: var(--muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
   .tool {
-    border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; font-size: 11px;
-    color: var(--muted); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 10.5px;
+    color: var(--muted); background: var(--bg);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .tool.running { border-color: var(--accent); color: var(--accent); animation: pulse 1s ease-in-out infinite; }
-  .tool.done { border-color: #2e7d32; color: var(--ink); animation: none; }
-  .tool.failed { border-color: var(--safety); color: var(--safety); animation: none; }
-  .tool .t-ms { opacity: .7; }
-  .no-tools { color: var(--muted); font-size: 11.5px; margin-top: 7px; font-style: italic; }
-  .panel-foot { color: var(--muted); font-size: 11.5px; margin: 10px 0 0; }
+  .no-tools { color: var(--muted); font-size: 11px; margin: 5px 0 0; font-style: italic; }
+  .panel-foot { color: var(--muted); font-size: 11px; margin: 8px 0 0; }
 
   @media (max-width: 900px) {
     #main { flex-direction: column; }
     #agents {
-      flex: 0 0 auto; max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--line);
+      flex: 0 0 auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line);
     }
   }
 </style>
@@ -206,12 +241,35 @@
 
 <div id="main">
 
-<aside id="agents" aria-label="Agents">
-  <p class="panel-h">This message <span class="ms" id="turn-ms"></span></p>
-  <div id="route">Nothing running. Send a message and this shows who is asked, in what order, and every tool they call.</div>
-  <p class="panel-h">The agents</p>
-  <div id="agent-list"><p class="hint">Loading…</p></div>
-  <p class="panel-foot" id="agents-foot"></p>
+<aside id="agents" aria-label="What the agents are doing">
+  <svg id="ring" viewBox="0 0 360 336" role="img" aria-labelledby="ring-title">
+    <title id="ring-title">The agents, and how far through this message they are</title>
+    <defs>
+      <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+        <path d="M0 0 L8 4 L0 8 z" fill="var(--accent)"/>
+      </marker>
+      <marker id="arrow-safety" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+        <path d="M0 0 L8 4 L0 8 z" fill="var(--safety)"/>
+      </marker>
+    </defs>
+    <g id="edges"></g>
+    <circle class="ring-track" cx="180" cy="170" r="72"/>
+    <circle id="ring-fill" class="ring-fill" cx="180" cy="170" r="72"/>
+    <text class="pct" x="180" y="176"><tspan id="pct-value">0</tspan><tspan class="pct-sign" dx="2">%</tspan></text>
+    <text id="ring-sub" class="ring-sub" x="180" y="200">ask something to start</text>
+    <g id="nodes"></g>
+  </svg>
+
+  <p id="route">Nothing running. Send a message and this shows who is asked, in what order, and every tool they call.</p>
+
+  <p class="panel-h">Step by step <span class="ms" id="turn-ms"></span></p>
+  <ul id="steps"><li><span class="none">nothing yet</span></li></ul>
+
+  <details class="agent-ref">
+    <summary>The four agents, and what each may call</summary>
+    <div id="agent-list"><p class="hint">Loading…</p></div>
+    <p class="panel-foot" id="agents-foot"></p>
+  </details>
 </aside>
 
 <div id="right">
@@ -281,12 +339,40 @@ const HISTORY_SENT = 6;
 // Everything is set with textContent: the tool names and purposes come from
 // files, but this page also renders search results, and one careless innerHTML
 // is all it takes.
+//
+// The ring is five steps: triage, the two specialists, escalation, and the
+// reply itself. Drawn as a ring rather than a list because the shape of a run
+// is the thing worth seeing - one classifier, then specialists side by side,
+// then a single answer composed in code.
+const SVG = 'http://www.w3.org/2000/svg';
+const CENTRE = {x: 180, y: 170};
+const R = 118;                       // where the nodes sit
+const NODE_R = 27;
+const RING_LEN = 2 * Math.PI * 72;   // the progress circle's circumference
+
+// Clockwise from the top, in the order a message travels.
+const STEPS = [
+  {key: 'triage',      icon: '\u{1F9ED}', label: 'triage'},
+  {key: 'diagnostics', icon: '\u{1F527}', label: 'diagnostics'},
+  {key: 'booking',     icon: '\u{1F4C5}', label: 'booking'},
+  {key: 'escalation',  icon: '\u{260E}\u{FE0F}', label: 'escalation'},
+  {key: 'reply',       icon: '\u{1F4AC}', label: 'reply'},
+];
+
 const routeEl = document.getElementById('route');
 const agentListEl = document.getElementById('agent-list');
-const turnMsEl = document.getElementById('turn-ms');
 const agentsFootEl = document.getElementById('agents-foot');
-const cards = {};          // agent name -> {card, ms, tools: {tool name -> chip}}
-let tick = null;
+const turnMsEl = document.getElementById('turn-ms');
+const stepsEl = document.getElementById('steps');
+const ringFill = document.getElementById('ring-fill');
+const pctEl = document.getElementById('pct-value');
+const ringSub = document.getElementById('ring-sub');
+const nodesEl = document.getElementById('nodes');
+const edgesEl = document.getElementById('edges');
+
+const nodes = {};        // key -> {g, ms}
+const toolLines = {};    // agent|tool -> <li>, so a running line becomes a finished one
+let expected = 5, finished = 0, tick = null, sawSafety = false;
 
 // el() is declared with the library code further down and hoisted to here.
 
@@ -294,72 +380,141 @@ let tick = null;
 // though nothing happened. Milliseconds below a second, seconds above it.
 function dur(ms) { return ms < 950 ? Math.max(1, Math.round(ms)) + 'ms' : (ms / 1000).toFixed(1) + 's'; }
 
-function drawAgents(agents) {
-  agentListEl.replaceChildren();
-  for (const a of agents) {
-    const card = el('div', 'agent');
-    card.dataset.agent = a.name;
+function svg(tag, attrs, text) {
+  const e = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
 
-    const top = el('div', 'agent-top');
-    top.append(el('span', 'dot'), el('span', 'agent-name', a.name));
-    const ms = el('span', 'agent-ms', a.deployed ? '' : 'not deployed');
-    top.append(ms);
-    card.append(top, el('p', 'agent-purpose', a.purpose), el('p', 'agent-role', a.role));
+function at(i, radius) {
+  const a = (-90 + i * (360 / STEPS.length)) * Math.PI / 180;
+  return {x: CENTRE.x + radius * Math.cos(a), y: CENTRE.y + radius * Math.sin(a), a};
+}
 
-    const bits = [a.model];
-    if (a.temperature !== null && a.temperature !== undefined) bits.push('temperature ' + a.temperature);
-    bits.push('returns ' + a.returns);
-    card.append(el('p', 'agent-model', bits.join(' · ')));
+function drawRing() {
+  ringFill.setAttribute('stroke-dasharray', RING_LEN);
+  ringFill.setAttribute('stroke-dashoffset', RING_LEN);
 
-    const tools = {};
-    if (a.tools.length) {
-      const row = el('div', 'tools');
-      for (const t of a.tools) {
-        const chip = el('span', 'tool', t.name);
-        chip.title = t.does;                 // hover says what it is for
-        chip.dataset.label = t.name;
-        row.append(chip);
-        tools[t.name] = chip;
-      }
-      card.append(row);
-    } else {
-      card.append(el('p', 'no-tools', 'no tools — it only classifies'));
-    }
+  // An arc of the same circle the nodes sit on, trimmed so it starts and ends
+  // clear of them - which is what makes it read as a flow rather than a wheel.
+  const step = 2 * Math.PI / STEPS.length;
+  const trim = Math.asin((NODE_R + 7) / R);
+  STEPS.forEach((s, i) => {
+    const from = (-90 * Math.PI / 180) + i * step + trim;
+    const to = (-90 * Math.PI / 180) + (i + 1) * step - trim;
+    if (i === STEPS.length - 1) return;   // the reply is the end, not a loop back
+    const p1 = {x: CENTRE.x + R * Math.cos(from), y: CENTRE.y + R * Math.sin(from)};
+    const p2 = {x: CENTRE.x + R * Math.cos(to), y: CENTRE.y + R * Math.sin(to)};
+    const edge = svg('path', {class: 'edge', d: `M${p1.x} ${p1.y} A${R} ${R} 0 0 1 ${p2.x} ${p2.y}`});
+    edge.dataset.to = STEPS[i + 1].key;
+    edgesEl.append(edge);
+  });
 
-    agentListEl.append(card);
-    cards[a.name] = {card, ms, tools};
+  STEPS.forEach((s, i) => {
+    const pos = at(i, R);
+    const g = svg('g', {class: 'node'});
+    g.dataset.step = s.key;
+    g.append(svg('circle', {class: 'node-ring', cx: pos.x, cy: pos.y, r: NODE_R}));
+    g.append(svg('text', {class: 'node-icon', x: pos.x, y: pos.y + 8}, s.icon));
+    // Labels sit outside the ring, and the top one above its node so it does
+    // not land on the progress circle. The two at the sides grow INWARDS -
+    // anchored in the middle, "diagnostics" ran off the right edge of the panel.
+    const out = at(i, R + 42);
+    const side = Math.cos(out.a);
+    const anchor = side > 0.3 ? 'end' : (side < -0.3 ? 'start' : 'middle');
+    const y = i === 0 ? pos.y - 42 : out.y + 4;
+    g.append(svg('text', {class: 'node-label', x: out.x, y: y, 'text-anchor': anchor}, s.label));
+    const ms = svg('text', {class: 'node-ms', x: out.x, y: y + 13, 'text-anchor': anchor});
+    g.append(ms);
+    nodesEl.append(g);
+    nodes[s.key] = {g, ms};
+  });
+}
+
+function setProgress(done, total) {
+  const pct = total ? Math.min(100, Math.round(100 * done / total)) : 0;
+  pctEl.textContent = pct;
+  ringFill.setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
+  ringFill.classList.toggle('safety', sawSafety);
+}
+
+function step(who, key, what, state, ms) {
+  // Keyed on what the step IS, not on how it currently reads: an agent's line
+  // says "thinking" and then "thinking · 612 tokens", and keying on the text
+  // left both of them on screen.
+  const id = who + '|' + key;
+  let li = toolLines[id];
+  if (!li) {
+    li = el('li');
+    li.append(el('span', 'who', who), el('span', 'what', what), el('span', 't', ''));
+    if (stepsEl.querySelector('.none')) stepsEl.replaceChildren();
+    stepsEl.append(li);
+    toolLines[id] = li;
   }
+  li.className = state || '';
+  li.children[1].textContent = what;
+  li.lastElementChild.textContent = ms === undefined ? '' : dur(ms);
+  stepsEl.scrollTop = stepsEl.scrollHeight;
 }
 
 function resetPanel() {
-  for (const {card, ms, tools} of Object.values(cards)) {
-    card.className = 'agent';
-    ms.textContent = '';
-    for (const chip of Object.values(tools)) {
-      chip.className = 'tool';
-      chip.textContent = chip.dataset.label;
-    }
-  }
+  for (const {g, ms} of Object.values(nodes)) { g.setAttribute('class', 'node'); ms.textContent = ''; }
+  for (const edge of edgesEl.children) edge.setAttribute('class', 'edge');
+  for (const k of Object.keys(toolLines)) delete toolLines[k];
+  stepsEl.replaceChildren(el('li', '', ''));
+  stepsEl.firstChild.append(el('span', 'none', 'reading your message…'));
   routeEl.className = '';
   routeEl.textContent = 'reading your message…';
+  expected = 5; finished = 0; sawSafety = false;
+  setProgress(0, expected);
+  ringSub.textContent = 'working…';
+
   const started = Date.now();
   clearInterval(tick);
   tick = setInterval(() => { turnMsEl.textContent = ((Date.now() - started) / 1000).toFixed(1) + 's'; }, 100);
   return started;
 }
 
-function stopTimer(started) {
+function finishPanel(started, ok) {
   clearInterval(tick);
   tick = null;
   turnMsEl.textContent = ((Date.now() - started) / 1000).toFixed(1) + 's';
+  if (ok) {
+    mark('reply', 'done');
+    lightEdge('reply');
+    finished = expected;
+    setProgress(finished, expected);
+    ringSub.textContent = 'answered in ' + ((Date.now() - started) / 1000).toFixed(1) + 's';
+  } else {
+    ringSub.textContent = 'stopped';
+  }
+}
+
+function mark(key, state) {
+  const n = nodes[key];
+  if (n) n.g.setAttribute('class', 'node ' + state);
+}
+
+function lightEdge(toKey) {
+  for (const edge of edgesEl.children) {
+    if (edge.dataset.to === toKey) edge.setAttribute('class', 'edge taken' + (sawSafety ? ' safety' : ''));
+  }
 }
 
 function onActivity(ev) {
   if (ev.kind === 'route') {
     const running = ev.agents || [];
-    for (const [name, c] of Object.entries(cards)) {
-      if (!running.includes(name) && !c.card.classList.contains('done')) c.card.classList.add('skipped');
+    sawSafety = !!ev.safety;
+    // Triage runs unless it was skipped; the reply is always the last step.
+    expected = (ev.triage_skipped || !running.length ? 0 : 1) + running.length + 1;
+    for (const s of STEPS) {
+      if (s.key === 'reply') continue;
+      if (s.key === 'triage') { if (ev.triage_skipped || !running.length) mark('triage', 'skipped'); continue; }
+      if (!running.includes(s.key)) mark(s.key, 'skipped');
     }
+    setProgress(finished, expected);
+
     const lines = [];
     if (ev.cached) lines.push('Answered from the cache — no agent ran, no tokens spent.');
     else if (!running.length) lines.push(ev.reason || 'Answered without an agent.');
@@ -370,36 +525,75 @@ function onActivity(ev) {
     else if (ev.reason && running.length) lines.push(ev.reason);
     routeEl.textContent = lines.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
+    step('router', 'route', running.length ? running.join(' → ') : 'answered without an agent', 'done');
+    if (ev.cached || !running.length) ringSub.textContent = 'no agent needed';
     return;
   }
-  const c = cards[ev.agent || ev.name];
-  if (!c) return;
+
   if (ev.kind === 'agent') {
-    c.card.classList.remove('skipped');
-    c.card.classList.toggle('busy', ev.state === 'working');
-    if (ev.state !== 'working') {
-      c.card.classList.add(ev.ok === false || ev.state === 'failed' ? 'failed' : 'done');
-      const parts = [];
-      if (ev.ms) parts.push(dur(ev.ms));
-      if (ev.tokens) parts.push(ev.tokens + ' tokens');
-      c.ms.textContent = parts.join(' · ');
+    if (ev.state === 'working') {
+      mark(ev.name, 'busy');
+      lightEdge(ev.name);
+      ringSub.textContent = ev.name + ' is working';
+      step(ev.name, 'turn', 'thinking', 'running');
+    } else {
+      const bad = ev.ok === false || ev.state === 'failed';
+      mark(ev.name, bad ? 'failed' : 'done');
+      const n = nodes[ev.name];
+      if (n && ev.ms) n.ms.textContent = dur(ev.ms);
+      finished = Math.min(expected - 1, finished + 1);
+      setProgress(finished, expected);
+      step(ev.name, 'turn', ev.tokens ? 'thinking · ' + ev.tokens + ' tokens' : 'thinking',
+           bad ? 'failed' : 'done', ev.ms);
     }
     return;
   }
+
   if (ev.kind === 'tool') {
-    const chip = c.tools[ev.name];
-    if (!chip) return;
-    c.card.classList.remove('skipped');
-    chip.className = 'tool ' + (ev.state === 'running' ? 'running' : (ev.failed ? 'failed' : 'done'));
-    chip.textContent = ev.state === 'running' ? chip.dataset.label
-                     : chip.dataset.label + ' ' + dur(ev.ms || 0);
+    if (ev.state === 'running') {
+      ringSub.textContent = ev.name.replace(/_/g, ' ');
+      step(ev.agent, ev.name, ev.name, 'running');
+    } else {
+      step(ev.agent, ev.name, ev.name, ev.failed ? 'failed' : 'done', ev.ms);
+    }
   }
 }
 
+function drawAgentReference(agents) {
+  agentListEl.replaceChildren();
+  for (const a of agents) {
+    const card = el('div', 'agent-card');
+    const icon = (STEPS.find(s => s.key === a.name) || {}).icon || '';
+    const h = el('h4');
+    h.append(el('span', '', icon + ' ' + a.name));
+    if (!a.deployed) h.append(el('span', 'not-live', 'not deployed'));
+    card.append(h, el('p', 'agent-purpose', a.purpose), el('p', 'agent-role', a.role));
+
+    const bits = [a.model];
+    if (a.temperature !== null && a.temperature !== undefined) bits.push('temperature ' + a.temperature);
+    bits.push('returns ' + a.returns);
+    card.append(el('p', 'agent-model', bits.join(' · ')));
+
+    if (a.tools.length) {
+      const row = el('div', 'tools');
+      for (const t of a.tools) {
+        const chip = el('span', 'tool', t.name);
+        chip.title = t.does;
+        row.append(chip);
+      }
+      card.append(row);
+    } else {
+      card.append(el('p', 'no-tools', 'no tools — it only classifies'));
+    }
+    agentListEl.append(card);
+  }
+}
+
+drawRing();
 fetch('/agents')
   .then(r => r.json())
   .then(j => {
-    drawAgents(j.agents || []);
+    drawAgentReference(j.agents || []);
     agentsFootEl.textContent =
       'Routing is decided in code, not by an agent calling other agents, so every step above is a value the service logged.';
   })
@@ -542,7 +736,8 @@ async function askServer(text) {
   } catch (e) {
     if (!streamed) { bubble.classList.remove('empty'); bubble.textContent = 'Could not reach the service. Is it running?'; }
   } finally {
-    stopTimer(startedAt);
+    // The reply node only lights up if an answer really arrived.
+    finishPanel(startedAt, !!done || !!streamed);
     working.remove();
     send.disabled = false;
     box.focus();
