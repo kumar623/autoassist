@@ -9,6 +9,7 @@ registration must match before anything is shown or changed, and one vehicle
 cannot hold two bookings on one day.
 """
 
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -64,10 +65,63 @@ def test_slots_come_back_in_our_own_shape(zoho):
     assert sent(zoho, "getAvailability")[0]["query_params"]["selected_date"] == DAY_ZOHO
 
 
-def test_a_day_with_nothing_free_says_so(zoho):
+def test_a_day_the_workshop_opens_but_is_full_says_nothing_free(zoho):
     zoho["answers"]["getAvailability"] = {"data": []}
+    zoho["answers"]["fetchAvailability_or_getRecentAppointment"] = {DAY_ZOHO: True}
     r = z.get_slots(on_date=TOMORROW.isoformat())
     assert r["ok"] and r["slots"] == [] and "nothing free" in r["note"]
+    assert not r.get("closed") and "closed" not in r["note"].lower()
+
+
+def test_a_closed_day_says_closed_not_fully_booked(zoho):
+    """Zoho answers an empty slot list whether the workshop is shut that day or
+    merely full, and those are not the same answer to a customer. Asked "what
+    slots are free on Saturday?" the live app said "there are no free slots on
+    Saturday 26 September" (20 Sep) - which reads as "fully booked", so the
+    customer asks again about the Saturday after. The workshop does not open on
+    Saturdays at all, and saying so is what stops the second question.
+    """
+    zoho["answers"]["getAvailability"] = {"data": []}
+    zoho["answers"]["fetchAvailability_or_getRecentAppointment"] = {DAY_ZOHO: False}
+    r = z.get_slots(on_date=TOMORROW.isoformat())
+    assert r["ok"] and r["slots"] == [] and r["closed"] is True
+    assert "closed" in r["note"].lower()
+    assert "nothing free" not in r["note"].lower()
+
+
+def test_the_opening_days_are_asked_in_chunks_zoho_accepts(zoho):
+    """Zoho refuses a date_list longer than seven with "Maximum Date Size
+    Exceeded" (live account, 20 Sep). SEARCH_DAYS is 21, so the question has to
+    be split - unsplit, the refusal came back as an ordinary dict, every day
+    read as closed, and the customer was told the workshop had nothing free for
+    three weeks.
+    """
+    sizes = []
+
+    def answer(arguments):
+        dates = json.loads(arguments["body"]["data"])["date_list"]
+        sizes.append(len(dates))
+        if len(dates) > 7:
+            return {"status": "failure", "message": "Maximum Date Size Exceeded"}
+        return dict.fromkeys(dates, True)
+
+    zoho["answers"]["fetchAvailability_or_getRecentAppointment"] = answer
+    zoho["answers"]["getAvailability"] = {"data": ["09:00 AM"]}
+    r = z.get_slots(days=3)
+    assert sizes, "never asked which days the workshop opens"
+    assert max(sizes) <= 7, f"sent {max(sizes)} dates; Zoho refuses more than seven"
+    assert r["ok"] and r["count"] > 0
+
+
+def test_a_refused_availability_question_is_not_an_empty_calendar(zoho):
+    """A refusal arrives in the body, not as an exception. Counted as data it
+    means "no day is open", which is indistinguishable from a full calendar and
+    is how the customer got told there was nothing free for three weeks."""
+    zoho["answers"]["fetchAvailability_or_getRecentAppointment"] = {
+        "status": "failure", "message": "Maximum Date Size Exceeded"}
+    r = z.get_slots(days=3)
+    assert not r["ok"], "a refusal was reported as an empty calendar"
+    assert "Maximum Date Size Exceeded" in r["error"]
 
 
 def test_only_open_days_are_looked_up(zoho):
