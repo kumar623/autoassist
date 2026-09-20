@@ -422,3 +422,19 @@ def test_conversation_cases_in_the_golden_set_are_well_formed():
             assert turn["role"] in ("customer", "assistant"), c["id"]
             assert turn["text"], c["id"]
         assert c.get("expect_agents_include") or c.get("expect_agents_exclude"), c["id"]
+
+
+# ---------------------------------------------------------------- agent definitions
+
+
+def test_every_agent_runs_on_the_model_we_chose():
+    """gpt-4.1-nano was tried for triage on 20 Sep: 0.5s faster and no worse at
+    routing, but it flagged more messages as safety issues, and the rule that
+    withholds a reassuring safety answer then dropped a good P0420 answer. Not
+    worth 0.5s. The deployment stays for a future attempt."""
+    import json
+    import pathlib
+
+    models = {f.stem: json.loads(f.read_text())["model"]
+              for f in pathlib.Path("agents/definitions").glob("*.json")}
+    assert set(models.values()) == {"gpt-4.1-mini"}

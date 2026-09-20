@@ -120,20 +120,26 @@ FAULT_CODE = re.compile(r"\b[PBCU][0-9]{4}\b", re.IGNORECASE)
 
 
 def prefetch_documents(message: str) -> tuple[str, str, int] | None:
-    """Search the library before the agent runs, when we already know the query.
+    """Search the library before the diagnostics agent runs.
 
-    A fault code IS the search. Letting the agent discover that costs 2.5s of it
-    deciding to call the tool, plus the call itself, before a word is written
-    (measured 20 Sep). Searching first and handing over the documents removes
-    that round entirely.
+    Two reasons, and the second matters more than the speed.
 
-    The search really happens, and is recorded as the tool call it is, so the
-    trace, the `searched` flag and the eval that checks it stay honest.
+    Speed: the agent spent ~2.5s deciding to call the search tool before writing
+    a word (measured 20 Sep). We know what it will search for - the customer's
+    message, or the fault code in it - so we search first and hand the results
+    over with the question.
+
+    Grounding: an answer with no search behind it is finding 1, the worst
+    failure this system has, and no prompt makes it impossible. Asking for
+    shorter answers made it likelier: the agent skipped the search on 1 run in 3
+    of a safety question. Searching here means the documents are always in front
+    of it, and the trace always shows the search that really happened. The rule
+    stopped depending on the model following an instruction.
     """
     codes = FAULT_CODE.findall(message)
-    if not codes:
+    query = " ".join(dict.fromkeys(c.upper() for c in codes)) if codes else " ".join(message.split())[:200]
+    if not query:
         return None
-    query = " ".join(dict.fromkeys(c.upper() for c in codes))
     started = time.time()
     try:
         output = tools.search_service_docs(query=query)
@@ -387,6 +393,24 @@ def _context_for(
             f"customer asked that these do not cover.\n\n{output}"
         )
 
+    # Length is asked for here rather than in the agent's own prompt. Put in the
+    # prompt, "be brief" cost grounding: the agent skipped the search on 1 run in
+    # 3 of a safety question (20 Sep). Here it cannot, because the search has
+    # already happened above - and the agent keeps its strict prompt for anyone
+    # calling it directly, including the eval suite.
+    if specialist == "diagnostics":
+        parts.append(
+            # No mention of safety warnings here. Naming them primed the agent to
+            # add one: a plain P0420 question came back starting "Do not drive
+            # the vehicle" for a worn catalytic converter (20 Sep). Its own
+            # prompt already says when a warning belongs, and when it does the
+            # warning is not counted against the length.
+            "KEEP IT SHORT: two short paragraphs, about 80 words in total - what it means, the likely "
+            "cause, what to do next. They are reading this on a phone, standing next to the car. Do not "
+            "restate the question and do not add a closing summary. Use only the documents you kept, "
+            "and cite every claim as usual."
+        )
+
     # Booking turns "Monday 21 September" into YYYY-MM-DD itself, and without a
     # date it guessed the year: 2020, from its training. The slot lookup then
     # said the day was in the past. Same clock as booking.py's slot calendar.
@@ -550,7 +574,9 @@ def _run_specialists(
 #
 # Negated forms ("not safe to drive") are the warning itself and must pass.
 REASSURANCE = re.compile(
-    r"(?<!not )(?<!n't )(?<!never )\bsafe to (keep |continue )?driv(e|ing)\b"
+    # "safe to drive with care" is what the fault code list itself says about
+    # medium-severity codes, so it is a documented answer, not reassurance.
+    r"(?<!not )(?<!n't )(?<!never )\bsafe to (keep |continue )?driv(e|ing)\b(?! with (care|caution))"
     r"|\b(is|are|feels?) (completely |perfectly |quite )?normal\b"
     r"|\b(nothing|no need) to worry\b",
     re.IGNORECASE,
@@ -781,7 +807,7 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     if on_status and route:
         on_status(" and ".join(AGENT_STATUS.get(s, s) for s in route))
 
-    # Only worth doing when diagnostics is going to run.
+    # Whenever diagnostics is going to run - not only for fault codes.
     prefetched = None
     if "diagnostics" in route:
         if on_status:

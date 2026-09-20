@@ -890,9 +890,16 @@ def test_a_fault_code_is_searched_before_the_agent_runs(monkeypatch):
     assert output == "2 CANDIDATES" and ms >= 0
 
 
-def test_a_message_without_a_fault_code_is_left_to_the_agent(monkeypatch):
-    monkeypatch.setattr(_router.tools, "search_service_docs", lambda **kw: pytest.fail("should not search"))
-    assert prefetch_documents("my clutch is slipping") is None
+def test_a_message_without_a_fault_code_is_searched_on_its_own_words(monkeypatch):
+    """Every diagnostics question is searched before the agent runs, not only
+    fault codes: asked for shorter answers, the agent skipped the search on one
+    run in three of a safety question. Now it cannot."""
+    asked = []
+    monkeypatch.setattr(_router.tools, "search_service_docs",
+                        lambda query, doc_type=None: asked.append(query) or "1 CANDIDATE")
+    found = prefetch_documents("my clutch is slipping")
+    assert found is not None and found[0] == "my clutch is slipping"
+    assert asked == ["my clutch is slipping"]
 
 
 def test_a_failed_pre_search_does_not_stop_the_answer(monkeypatch):
@@ -954,3 +961,41 @@ def test_the_status_comes_before_the_pre_search(monkeypatch):
     _router.handle(None, "what does P0420 mean", agent_ids={"triage": "t", **IDS},
                    on_status=lambda text: order.append(text))
     assert order == ["checking the service documents", "looking in the service documents", "searched"]
+
+
+def test_a_very_long_message_is_trimmed_before_searching(monkeypatch):
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "x")
+    query, _, _ = prefetch_documents("the car " + "rattles " * 100)
+    assert len(query) <= 200
+
+
+@pytest.mark.parametrize("answer,withheld", [
+    ("P0420 is medium severity; it is safe to drive with care (fault code list, P0420).", False),
+    ("It is safe to drive with caution until the service.", False),
+    ("A spongy pedal is normal and it is safe to keep driving (TSB-032).", True),
+    ("It is safe to drive.", True),
+])
+def test_the_fault_code_lists_own_wording_is_not_treated_as_reassurance(answer, withheld):
+    """'safe to drive with care' is what data/dtc_codes.csv says about medium
+    severity codes. Withholding it loses a documented answer."""
+    decision = _decision(["diagnostics"], safety=True)
+    turns = [_turn("diagnostics", answer)]
+    assert bool(_withhold_reassurance(turns, decision)) is withheld
+
+
+def test_brevity_is_asked_per_request_not_in_the_agents_prompt():
+    """In the prompt it cost grounding: the agent skipped the search on 1 run in
+    3 of a safety question. Here the search has already happened."""
+    import json
+    import pathlib
+
+    prompt = json.loads(pathlib.Path("agents/definitions/diagnostics.json").read_text())["instructions"]
+    assert "80 words" not in prompt, "brevity belongs in the request, not the agent definition"
+
+    context = _context_for("diagnostics", "what does P0420 mean", _decision(["diagnostics"]), [], None,
+                           ("P0420", "2 CANDIDATES", 700))
+    assert "80 words" in context
+    # Naming safety here primed the agent to warn about a worn catalytic
+    # converter (20 Sep). Its own prompt decides when a warning belongs.
+    assert "safety" not in context.split("KEEP IT SHORT")[1].lower()
+    assert "80 words" not in _context_for("booking", "book me", _decision(["booking"]), [])
