@@ -59,6 +59,11 @@ class FakeFoundry:
     def create_run(self, thread_id, agent_id):
         return self._next()
 
+    def create_thread_and_run(self, agent_id, content, role="user"):
+        """One call: thread, message and run. What ask() uses."""
+        self.messages.append(content)
+        return {**self._next(), "thread_id": "thread_1"}
+
     def get_run(self, thread_id, run_id):
         return self._next()
 
@@ -172,10 +177,10 @@ def test_unparseable_tool_arguments_are_recorded_not_fatal():
 
 def test_the_thread_is_deleted_even_when_the_run_blows_up():
     class Broken(FakeFoundry):
-        def create_run(self, thread_id, agent_id):
+        def create_thread_and_run(self, agent_id, content, role="user"):
             raise RuntimeError("Azure is down")
 
     c = Broken([])
     with pytest.raises(RuntimeError):
         runner.ask(c, "asst_1", "q")
-    assert c.deleted == ["thread_1"]
+    assert c.deleted == [], "there is no thread to delete: the one call that makes it also failed"

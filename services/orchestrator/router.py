@@ -111,6 +111,28 @@ SAFETY_WORDS = re.compile(
 # is a list of free slots.
 BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule)\b", re.IGNORECASE)
 
+# Triage costs 2.0-2.7s of every reply - a quarter of it - to classify a message
+# (measured on the live app, 20 Sep). Some messages do not need classifying: a
+# fault code with nothing else in it is a diagnostics question, and no model is
+# needed to see that. Deliberately narrow: any hint of a booking, a safety issue
+# or a conversation in progress goes to triage as before.
+FAULT_CODE = re.compile(r"\b[PBCU][0-9]{4}\b", re.IGNORECASE)
+
+
+def fast_route(message: str, history: list[dict] | None) -> TriageDecision | None:
+    """A decision without asking triage, or None when triage is needed."""
+    if history:
+        return None  # a follow-up only makes sense in context; triage reads that
+    if not FAULT_CODE.search(message):
+        return None
+    if BOOKING_WORDS.search(message) or SAFETY_WORDS.search(message):
+        return None
+    return TriageDecision(
+        intents=["diagnostics"],
+        reason="a fault code and nothing else: triage skipped",
+        triage_skipped=True,
+    )
+
 
 @dataclass
 class TriageDecision:
@@ -123,6 +145,7 @@ class TriageDecision:
     parse_failed: bool = False
     safety_source: str = "none"  # "triage", "keyword", "both", "none"
     booking_added_by_keyword: bool = False
+    triage_skipped: bool = False
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
@@ -614,7 +637,13 @@ def _handle_inner(
         out.duration_ms = int((time.time() - started) * 1000)
         return
 
-    # --- 1. triage ---
+    # --- 1. triage, unless the message speaks for itself ---
+    decision = fast_route(message, history)
+    if decision is not None:
+        log.info("triage skipped: %s", decision.reason)
+        _route_and_answer(client, ids, message, decision, timeout, history, out, started)
+        return
+
     triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout, agent_name="triage")
     out.turns.append(triage_turn)
 
@@ -643,18 +672,28 @@ def _handle_inner(
             safety_source=decision.safety_source,
             triage_parse_failed=decision.parse_failed,
             booking_added_by_keyword=decision.booking_added_by_keyword,
+            triage_skipped=decision.triage_skipped,
             reason=decision.reason[:200],
             has_registration=bool(decision.registration),
             has_date=bool(decision.date),
         )
 
+    _route_and_answer(client, ids, message, decision, timeout, history, out, started)
+
+
+def _route_and_answer(client, ids, message, decision, timeout, history, out, started) -> None:
+    """Run the specialists the decision calls for, then compose the reply."""
+    out.decision = decision
+
     # --- 2. specialists ---
     route = [s for s in decision.route() if s in ids]
+    before = len(out.turns)  # triage's turn, or nothing when triage was skipped
     out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history))
+    specialists = out.turns[before:]
 
     # --- 3. check, then compose ---
-    out.withheld = _withhold_reassurance(out.turns[1:], decision)
-    out.reply = _compose(out.turns[1:], decision)
+    out.withheld = _withhold_reassurance(specialists, decision)
+    out.reply = _compose(specialists, decision)
     out.duration_ms = int((time.time() - started) * 1000)
 
     log.info(

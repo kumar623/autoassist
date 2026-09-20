@@ -112,6 +112,18 @@ class FoundryAgents:
     def create_run(self, thread_id: str, agent_id: str) -> dict:
         return self._call("POST", f"/threads/{thread_id}/runs", json={"assistant_id": agent_id})
 
+    def create_thread_and_run(self, agent_id: str, content: str, role: str = "user") -> dict:
+        """Thread, message and run in one request instead of three.
+
+        Three round trips to South India cost roughly 0.5s of every reply, and
+        the thread is thrown away after the turn anyway. The run comes back
+        carrying its thread_id.
+        """
+        return self._call("POST", "/threads/runs", json={
+            "assistant_id": agent_id,
+            "thread": {"messages": [{"role": role, "content": content}]},
+        })
+
     def get_run(self, thread_id: str, run_id: str) -> dict:
         return self._call("GET", f"/threads/{thread_id}/runs/{run_id}")
 
