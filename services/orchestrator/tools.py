@@ -44,7 +44,17 @@ def get_available_slots(date: str | None = None) -> str:
 
 def book_service_slot(slot_id: str, registration: str, issue: str = "", customer_name: str = "",
                       customer_email: str = "", customer_phone: str = "") -> str:
-    customer = {"name": customer_name, "email": customer_email, "phone": customer_phone}
+    customer = {"name": customer_name.strip(), "email": customer_email.strip(), "phone": customer_phone.strip()}
+    # Refused here, in code, for either backend. Told only in the prompt, the
+    # agent booked without a phone number anyway (live app, 20 Sep) - and the
+    # workshop's calendar rejects those, so the customer would have been told
+    # they had an appointment they did not have.
+    missing = [what for what, value in
+               (("name", customer["name"]), ("email address", customer["email"]), ("phone number", customer["phone"]))
+               if not value]
+    if missing:
+        return json.dumps({"ok": False, "error": f"Not booked. The workshop needs the customer's "
+                                                 f"{', '.join(missing)}. Ask for it, then book."}, indent=2)
     return json.dumps(BACKEND.book_slot(slot_id, registration, issue, customer), indent=2)
 
 

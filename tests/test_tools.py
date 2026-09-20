@@ -78,7 +78,9 @@ def test_booking_through_the_tool_layer():
     out = json.loads(
         tools.execute(
             "book_service_slot",
-            json.dumps({"slot_id": slot_id, "registration": "AP31AB1234", "issue": "noise"}),
+            json.dumps({"slot_id": slot_id, "registration": "AP31AB1234", "issue": "noise",
+                        "customer_name": "Krishna", "customer_email": "k@example.com",
+                        "customer_phone": "9876543210"}),
         )
     )
     assert out["ok"]
@@ -106,3 +108,32 @@ def test_both_backends_offer_the_same_booking_functions():
 
     for name in ("get_slots", "book_slot", "get_booking", "move_booking", "cancel_booking"):
         assert callable(getattr(file_backend, name)) and callable(getattr(zoho_bookings, name)), name
+
+
+@pytest.mark.parametrize("missing,words", [
+    ("customer_name", "name"), ("customer_email", "email address"), ("customer_phone", "phone number"),
+])
+def test_a_booking_without_the_customers_details_is_refused(missing, words):
+    """Live app, 20 Sep: told only in the prompt, the agent booked without a
+    phone number. The workshop's calendar rejects that, so the customer would
+    have been promised an appointment that does not exist."""
+    import json
+
+    slots = json.loads(tools.execute("get_available_slots", "{}"))
+    args = {"slot_id": slots["slots"][0]["slot_id"], "registration": "AP31AB1234", "issue": "service",
+            "customer_name": "Krishna", "customer_email": "k@example.com", "customer_phone": "9876543210"}
+    args[missing] = "   "
+    out = json.loads(tools.execute("book_service_slot", json.dumps(args)))
+    assert out["ok"] is False
+    assert words in out["error"]
+    assert "reference" not in out
+
+
+def test_a_booking_with_every_detail_goes_through():
+    import json
+
+    slots = json.loads(tools.execute("get_available_slots", "{}"))
+    out = json.loads(tools.execute("book_service_slot", json.dumps({
+        "slot_id": slots["slots"][0]["slot_id"], "registration": "AP31AB1234", "issue": "service",
+        "customer_name": "Krishna", "customer_email": "k@example.com", "customer_phone": "9876543210"})))
+    assert out["ok"] and out["reference"].startswith("AA-")
