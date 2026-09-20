@@ -839,11 +839,11 @@ def test_small_talk_is_sent_to_the_listener_too(monkeypatch):
 
 
 def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
-    """An agent searches before it writes, so the first words can be 5s away."""
+    """An agent searches before it writes, so the first words can be seconds away."""
     said = []
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
     def ask_streaming(client, agent_id, prompt, on_delta, timeout=90.0, agent_name="", on_status=None):
-        on_status("looking in the service documents")
         on_delta("Answer.")
         t = TurnResult(agent_name=agent_name, status="completed")
         t.answer = "Answer."
@@ -857,6 +857,7 @@ def test_the_customer_is_told_what_is_happening_while_they_wait(monkeypatch):
 
 def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
     said = []
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
 
     def ask(client, agent_id, prompt, timeout=90.0, agent_name=""):
         t = TurnResult(agent_name=agent_name, status="completed")
@@ -865,7 +866,9 @@ def test_the_status_says_who_is_answering_on_the_slow_path(monkeypatch):
 
     monkeypatch.setattr(_router, "ask", ask)
     _router.handle(None, "P0420 and can I book tomorrow", agent_ids={"triage": "t", **IDS}, on_status=said.append)
-    assert said == ["reading your message", "checking the service documents and checking the workshop calendar"]
+    assert said == ["reading your message",
+                    "checking the service documents and checking the workshop calendar",
+                    "looking in the service documents"]
 
 
 # ---------------------------------------------------------------- searching before the agent
