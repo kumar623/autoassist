@@ -83,3 +83,26 @@ def test_booking_through_the_tool_layer():
     )
     assert out["ok"]
     assert out["reference"].startswith("AA-")
+
+
+def test_the_booking_backend_is_chosen_by_configuration(monkeypatch):
+    """BOOKING_BACKEND=zoho puts bookings in the workshop's real calendar."""
+    import importlib
+
+    monkeypatch.setenv("BOOKING_BACKEND", "zoho")
+    reloaded = importlib.reload(tools)
+    try:
+        assert reloaded.BACKEND.__name__.endswith("zoho_bookings")
+        monkeypatch.setenv("BOOKING_BACKEND", "file")
+        assert importlib.reload(tools).BACKEND.__name__.endswith("booking")
+    finally:
+        monkeypatch.delenv("BOOKING_BACKEND", raising=False)
+        importlib.reload(tools)
+
+
+def test_both_backends_offer_the_same_booking_functions():
+    from services.orchestrator import booking as file_backend
+    from services.orchestrator import zoho_bookings
+
+    for name in ("get_slots", "book_slot", "get_booking", "move_booking", "cancel_booking"):
+        assert callable(getattr(file_backend, name)) and callable(getattr(zoho_bookings, name)), name
