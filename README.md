@@ -242,8 +242,10 @@ hand) · model-graded evaluation (the scorer checks compliance, not quality).
   the conversation is gone. Booking and escalation see the recent turns.
   Diagnostics sees only what the customer said earlier, never earlier answers,
   so every question is searched afresh (finding 3).
-- **Bookings are a JSON file.** The interface is designed so Azure Table Storage
-  or a real calendar drops in without touching the agents.
+- **Bookings are in Zoho Bookings** (`BOOKING_BACKEND=zoho`), through Zoho's MCP
+  server: real appointments in the workshop's calendar, and Zoho emails the
+  customer. The JSON file remains as the default and for offline tests. See
+  [docs/decisions/008-zoho-bookings.md](docs/decisions/008-zoho-bookings.md).
 - **No reranker** on the Free search tier.
 - **The relevance floor cannot judge topic.** It measures agreement between
   search methods, not whether a document is about the right component. A clutch

@@ -164,7 +164,13 @@ class ZohoAuth:
 
 
 def set_env_var(path: pathlib.Path, key: str, value: str) -> None:
-    """Set KEY=value in a .env file, replacing an existing line or appending one."""
+    """Set KEY=value in a .env file, replacing an existing line or appending one.
+
+    Values with spaces are quoted: .env is read by python-dotenv, which copes
+    either way, but also by `source .env` in shell scripts, which does not.
+    """
+    if value and (" " in value or '"' in value) :
+        value = '"' + value.replace('"', '\\"') + '"'
     lines = path.read_text().splitlines() if path.exists() else []
     out, done = [], False
     for line in lines:
