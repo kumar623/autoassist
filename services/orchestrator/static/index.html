@@ -126,68 +126,80 @@
     font-size: 12px; padding: 4px 10px; margin-top: 6px;
   }
 
-  /* The agents panel: who is being asked, what they may touch, and what they
-     are doing right now. A ring rather than a list, because the shape of the
-     run is the thing worth seeing: triage first, the specialists together,
-     then one reply. A trace you open afterwards answers a different question. */
+  /* The agents panel: the run drawn as a tree.
+     Left to right, the way a message actually travels - one classifier, the
+     specialists it picks side by side, the tools each of those calls hanging
+     off it, and one reply composed in code. Half the page, because the
+     branches are the point and they need the room. */
   #main { flex: 1; display: flex; min-height: 0; }
-  #right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #right { flex: 1 1 50%; display: flex; flex-direction: column; min-width: 0; }
   #agents {
-    flex: 0 0 360px; border-right: 1px solid var(--line); background: var(--panel);
-    overflow-y: auto; padding: 10px 12px 16px; font-size: 13px;
+    flex: 1 1 50%; min-width: 0; border-right: 1px solid var(--line);
+    background: var(--panel); overflow-y: auto; padding: 12px 14px 16px; font-size: 13px;
   }
   .panel-h {
-    display: flex; align-items: baseline; gap: 8px; margin: 10px 0 4px;
+    display: flex; align-items: baseline; gap: 8px; margin: 12px 0 5px;
     font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
   }
   .panel-h .ms { margin-left: auto; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
 
-  /* the ring */
-  #ring { width: 100%; height: auto; display: block; }
-  .ring-track { fill: none; stroke: var(--line); stroke-width: 7; }
-  .ring-fill {
-    fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round;
-    transform: rotate(-90deg); transform-origin: 180px 170px;
-    transition: stroke-dashoffset .45s ease;
+  #tree { width: 100%; height: auto; display: block; }
+  .link { fill: none; stroke: var(--line); stroke-width: 1.6; stroke-dasharray: 3 4; }
+  .link.taken { stroke: var(--accent); stroke-dasharray: none; stroke-width: 2; marker-end: url(#tip); }
+  .link.taken.safety { stroke: var(--safety); marker-end: url(#tip-safety); }
+  .link.tool-link { stroke-width: 1.2; }
+
+  .box { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
+  .box-name { fill: var(--ink); font-size: 13.5px; font-weight: 650; }
+  .box-sub { fill: var(--muted); font-size: 11px; }
+  .box-ms {
+    fill: var(--muted); font-size: 10.5px; text-anchor: end;
+    font-variant-numeric: tabular-nums;
   }
-  .ring-fill.safety { stroke: var(--safety); }
-  .pct { fill: var(--ink); font-size: 40px; font-weight: 700; text-anchor: middle; }
-  .pct-sign { font-size: 17px; fill: var(--muted); font-weight: 600; }
-  .ring-sub { fill: var(--muted); font-size: 12px; text-anchor: middle; }
+  .icon { font-size: 15px; }
 
-  .edge { fill: none; stroke: var(--line); stroke-width: 1.6; stroke-dasharray: 2 4; }
-  .edge.taken { stroke: var(--accent); stroke-dasharray: none; stroke-width: 2; marker-end: url(#arrow); }
-  .edge.taken.safety { stroke: var(--safety); marker-end: url(#arrow-safety); }
+  .step.skipped { opacity: .28; }
+  .step.busy .box { stroke: var(--accent); stroke-width: 2.5; animation: breathe 1.1s ease-in-out infinite; }
+  .step.busy .box-name { fill: var(--accent); }
+  .step.done .box { stroke: #2e7d32; stroke-width: 2; }
+  .step.failed .box { stroke: var(--safety); stroke-width: 2; }
+  .step.failed .box-name { fill: var(--safety); }
+  @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+  @media (prefers-reduced-motion: reduce) { .step.busy .box { animation: none } }
 
-  .node-ring { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
-  .node-icon { font-size: 22px; text-anchor: middle; }
-  .node-label { fill: var(--muted); font-size: 11.5px; font-weight: 650; }
-  .node-ms { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
-  .node { cursor: default; }
-  .node.skipped { opacity: .3; }
-  .node.busy .node-ring { stroke: var(--accent); stroke-width: 2.5; animation: breathe 1.1s ease-in-out infinite; }
-  .node.busy .node-label { fill: var(--accent); }
-  .node.done .node-ring { stroke: #2e7d32; stroke-width: 2; }
-  .node.done .node-label { fill: var(--ink); }
-  .node.failed .node-ring { stroke: var(--safety); stroke-width: 2; }
-  .node.failed .node-label { fill: var(--safety); }
-  @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-  @media (prefers-reduced-motion: reduce) { .node.busy .node-ring { animation: none } }
+  .tool-box { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+  .tool-name {
+    fill: var(--muted); font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .tool-where { fill: var(--muted); font-size: 10.5px; opacity: .85; }
+  .tool-where.mcp { fill: var(--accent); opacity: 1; }
+  .step.busy .tool-box, .step.done .tool-box { stroke: var(--line); }
+  .tool.running .tool-box { stroke: var(--accent); stroke-width: 2; animation: breathe 1.1s ease-in-out infinite; }
+  .tool.running .tool-name { fill: var(--accent); }
+  .tool.done .tool-box { stroke: #2e7d32; stroke-width: 1.6; }
+  .tool.done .tool-name { fill: var(--ink); }
+  .tool.failed .tool-box { stroke: var(--safety); }
+  .tool.failed .tool-name { fill: var(--safety); }
+
+  .pct { fill: var(--ink); font-size: 15px; font-weight: 700; }
+  .bar-track { fill: var(--line); }
+  .bar-fill { fill: var(--accent); transition: width .4s ease; }
+  .bar-fill.safety { fill: var(--safety); }
 
   #route {
-    border: 1px dashed var(--line); border-radius: 8px; padding: 7px 9px;
-    color: var(--muted); font-size: 11.5px; min-height: 34px; margin: 0;
+    border: 1px dashed var(--line); border-radius: 8px; padding: 7px 10px;
+    color: var(--muted); font-size: 12px; min-height: 34px; margin: 0;
   }
   #route.safety { border-color: var(--safety); border-style: solid; color: var(--safety); background: var(--safety-bg); }
 
-  /* what it actually did, line by line */
   #steps { list-style: none; margin: 0; padding: 0; font-size: 11.5px; }
   #steps li {
-    display: flex; gap: 7px; align-items: baseline; padding: 3px 0;
+    display: flex; gap: 8px; align-items: baseline; padding: 3px 0;
     border-bottom: 1px solid var(--line);
   }
   #steps li:last-child { border-bottom: 0; }
-  #steps .who { color: var(--muted); flex: 0 0 74px; }
+  #steps .who { color: var(--muted); flex: 0 0 82px; }
   #steps .what {
     flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -197,8 +209,7 @@
   #steps li.failed .what { color: var(--safety); }
   #steps .none { color: var(--muted); font-style: italic; }
 
-  /* the reference list: who they are and what they may call */
-  .agent-ref { border-top: 1px solid var(--line); padding: 8px 0 0; margin-top: 4px; }
+  .agent-ref { border-top: 1px solid var(--line); padding: 8px 0 0; margin-top: 10px; }
   .agent-ref summary { font-size: 12px; }
   .agent-card { padding: 8px 0; border-bottom: 1px solid var(--line); }
   .agent-card:last-child { border-bottom: 0; }
@@ -211,7 +222,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   .tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
-  .tool {
+  .tool-chip {
     border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 10.5px;
     color: var(--muted); background: var(--bg);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -222,7 +233,7 @@
   @media (max-width: 900px) {
     #main { flex-direction: column; }
     #agents {
-      flex: 0 0 auto; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line);
+      flex: 0 0 auto; max-height: 46vh; border-right: 0; border-bottom: 1px solid var(--line);
     }
   }
 </style>
@@ -242,27 +253,24 @@
 <div id="main">
 
 <aside id="agents" aria-label="What the agents are doing">
-  <svg id="ring" viewBox="0 0 360 336" role="img" aria-labelledby="ring-title">
-    <title id="ring-title">The agents, and how far through this message they are</title>
+  <p class="panel-h">This message <span class="ms" id="turn-ms"></span></p>
+  <svg id="tree" viewBox="0 0 752 430" role="img" aria-labelledby="tree-title">
+    <title id="tree-title">How this message travels: triage, the specialists it picks, the tools they call, and the reply</title>
     <defs>
-      <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+      <marker id="tip" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="5" markerHeight="5" orient="auto">
         <path d="M0 0 L8 4 L0 8 z" fill="var(--accent)"/>
       </marker>
-      <marker id="arrow-safety" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto">
+      <marker id="tip-safety" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="5" markerHeight="5" orient="auto">
         <path d="M0 0 L8 4 L0 8 z" fill="var(--safety)"/>
       </marker>
     </defs>
-    <g id="edges"></g>
-    <circle class="ring-track" cx="180" cy="170" r="72"/>
-    <circle id="ring-fill" class="ring-fill" cx="180" cy="170" r="72"/>
-    <text class="pct" x="180" y="176"><tspan id="pct-value">0</tspan><tspan class="pct-sign" dx="2">%</tspan></text>
-    <text id="ring-sub" class="ring-sub" x="180" y="200">ask something to start</text>
-    <g id="nodes"></g>
+    <g id="links"></g>
+    <g id="boxes"></g>
   </svg>
 
   <p id="route">Nothing running. Send a message and this shows who is asked, in what order, and every tool they call.</p>
 
-  <p class="panel-h">Step by step <span class="ms" id="turn-ms"></span></p>
+  <p class="panel-h">Step by step</p>
   <ul id="steps"><li><span class="none">nothing yet</span></li></ul>
 
   <details class="agent-ref">
@@ -334,44 +342,43 @@ const HISTORY_SENT = 6;
 
 // ---------------------------------------------------------- the agents panel
 //
-// Read from /agents, which reads the same definition files the deploy script
-// deploys from - so the panel cannot quietly drift from what is really running.
-// Everything is set with textContent: the tool names and purposes come from
-// files, but this page also renders search results, and one careless innerHTML
-// is all it takes.
+// The run, drawn as a tree, left to right in the order a message travels:
 //
-// The ring is five steps: triage, the two specialists, escalation, and the
-// reply itself. Drawn as a ring rather than a list because the shape of a run
-// is the thing worth seeing - one classifier, then specialists side by side,
-// then a single answer composed in code.
+//   message -> triage -> diagnostics -> search_service_docs   Azure AI Search
+//                     |              \- raise_ticket          local store
+//                     |- booking ----> get_available_slots    Zoho Bookings · MCP
+//                     |              \- book_service_slot     Zoho Bookings · MCP
+//                     \- escalation -> raise_ticket           local store
+//                                                          -> reply
+//
+// The branches are the point. "booking calls get_available_slots" says nothing
+// about the call leaving this process, speaking MCP to Zoho's server and
+// landing in the workshop's real calendar - so every tool says where it goes,
+// read from /agents rather than typed in here.
+//
+// Everything is set with textContent: the names come from files, but this page
+// also renders search results, and one careless innerHTML is all it takes.
 const SVG = 'http://www.w3.org/2000/svg';
-const CENTRE = {x: 180, y: 170};
-const R = 118;                       // where the nodes sit
-const NODE_R = 27;
-const RING_LEN = 2 * Math.PI * 72;   // the progress circle's circumference
+const COL = {msg: 12, triage: 150, agent: 310, reply: 618};
+const W = {msg: 104, triage: 120, agent: 150, tool: 152, reply: 118};
+const BOX_H = 40, TOOL_H = 21, TOOL_GAP = 4, BAND_GAP = 18, TOP = 14;
 
-// Clockwise from the top, in the order a message travels.
-const STEPS = [
-  {key: 'triage',      icon: '\u{1F9ED}', label: 'triage'},
-  {key: 'diagnostics', icon: '\u{1F527}', label: 'diagnostics'},
-  {key: 'booking',     icon: '\u{1F4C5}', label: 'booking'},
-  {key: 'escalation',  icon: '\u{260E}\u{FE0F}', label: 'escalation'},
-  {key: 'reply',       icon: '\u{1F4AC}', label: 'reply'},
-];
+const ICONS = {triage: '\u{1F9ED}', diagnostics: '\u{1F527}', booking: '\u{1F4C5}',
+               escalation: '\u{260E}\u{FE0F}', reply: '\u{1F4AC}', message: '\u{1F4AC}'};
+const SPECIALISTS = ['diagnostics', 'booking', 'escalation'];
 
 const routeEl = document.getElementById('route');
 const agentListEl = document.getElementById('agent-list');
 const agentsFootEl = document.getElementById('agents-foot');
 const turnMsEl = document.getElementById('turn-ms');
 const stepsEl = document.getElementById('steps');
-const ringFill = document.getElementById('ring-fill');
-const pctEl = document.getElementById('pct-value');
-const ringSub = document.getElementById('ring-sub');
-const nodesEl = document.getElementById('nodes');
-const edgesEl = document.getElementById('edges');
+const treeEl = document.getElementById('tree');
+const linksEl = document.getElementById('links');
+const boxesEl = document.getElementById('boxes');
 
-const nodes = {};        // key -> {g, ms}
-const toolLines = {};    // agent|tool -> <li>, so a running line becomes a finished one
+const parts = {};       // 'triage' | 'booking' | 'booking.get_available_slots' -> {g, ms, box}
+const links = {};       // child key -> <path>
+const lines = {};       // step-list rows, keyed on what the step IS
 let expected = 5, finished = 0, tick = null, sawSafety = false;
 
 // el() is declared with the library code further down and hoisted to here.
@@ -387,56 +394,94 @@ function svg(tag, attrs, text) {
   return e;
 }
 
-function at(i, radius) {
-  const a = (-90 + i * (360 / STEPS.length)) * Math.PI / 180;
-  return {x: CENTRE.x + radius * Math.cos(a), y: CENTRE.y + radius * Math.sin(a), a};
+// An elbow: out of the parent, across, into the child. Straight lines read as a
+// tree; curves through four columns read as spaghetti.
+function elbow(x1, y1, x2, y2, mid) {
+  const turn = mid === undefined ? x1 + Math.max(14, (x2 - x1) / 2) : mid;
+  return `M${x1} ${y1} H${turn} V${y2} H${x2}`;
 }
 
-function drawRing() {
-  ringFill.setAttribute('stroke-dasharray', RING_LEN);
-  ringFill.setAttribute('stroke-dashoffset', RING_LEN);
+function drawBox(key, x, y, w, name, sub, icon) {
+  const g = svg('g', {class: 'step'});
+  g.dataset.key = key;
+  g.append(svg('rect', {class: 'box', x: x, y: y, width: w, height: BOX_H, rx: 9}));
+  if (icon) g.append(svg('text', {class: 'icon', x: x + 11, y: y + 25}, icon));
+  g.append(svg('text', {class: 'box-name', x: x + (icon ? 32 : 11), y: y + (sub ? 19 : 25)}, name));
+  if (sub) g.append(svg('text', {class: 'box-sub', x: x + (icon ? 32 : 11), y: y + 32}, sub));
+  const ms = svg('text', {class: 'box-ms', x: x + w - 10, y: y + 32});
+  g.append(ms);
+  boxesEl.append(g);
+  parts[key] = {g, ms, x, y, w};
+  return parts[key];
+}
 
-  // An arc of the same circle the nodes sit on, trimmed so it starts and ends
-  // clear of them - which is what makes it read as a flow rather than a wheel.
-  const step = 2 * Math.PI / STEPS.length;
-  const trim = Math.asin((NODE_R + 7) / R);
-  STEPS.forEach((s, i) => {
-    const from = (-90 * Math.PI / 180) + i * step + trim;
-    const to = (-90 * Math.PI / 180) + (i + 1) * step - trim;
-    if (i === STEPS.length - 1) return;   // the reply is the end, not a loop back
-    const p1 = {x: CENTRE.x + R * Math.cos(from), y: CENTRE.y + R * Math.sin(from)};
-    const p2 = {x: CENTRE.x + R * Math.cos(to), y: CENTRE.y + R * Math.sin(to)};
-    const edge = svg('path', {class: 'edge', d: `M${p1.x} ${p1.y} A${R} ${R} 0 0 1 ${p2.x} ${p2.y}`});
-    edge.dataset.to = STEPS[i + 1].key;
-    edgesEl.append(edge);
-  });
+function toolBox(key, agent, x, y, name, where) {
+  const g = svg('g', {class: 'tool'});
+  g.dataset.key = key;
+  g.append(svg('rect', {class: 'tool-box', x: x, y: y, width: W.tool, height: TOOL_H, rx: 6}));
+  g.append(svg('text', {class: 'tool-name', x: x + 8, y: y + 14.5}, name));
+  const mcp = /MCP/.test(where);
+  g.append(svg('text', {class: 'tool-where' + (mcp ? ' mcp' : ''), x: x + W.tool + 10, y: y + 14.5}, where));
+  const ms = svg('text', {class: 'box-ms', x: x, y: y});   // unused in the tree; the step list has the timings
+  boxesEl.append(g);
+  parts[key] = {g, ms, x, y, w: W.tool};
+}
 
-  STEPS.forEach((s, i) => {
-    const pos = at(i, R);
-    const g = svg('g', {class: 'node'});
-    g.dataset.step = s.key;
-    g.append(svg('circle', {class: 'node-ring', cx: pos.x, cy: pos.y, r: NODE_R}));
-    g.append(svg('text', {class: 'node-icon', x: pos.x, y: pos.y + 8}, s.icon));
-    // Labels sit outside the ring, and the top one above its node so it does
-    // not land on the progress circle. The two at the sides grow INWARDS -
-    // anchored in the middle, "diagnostics" ran off the right edge of the panel.
-    const out = at(i, R + 42);
-    const side = Math.cos(out.a);
-    const anchor = side > 0.3 ? 'end' : (side < -0.3 ? 'start' : 'middle');
-    const y = i === 0 ? pos.y - 42 : out.y + 4;
-    g.append(svg('text', {class: 'node-label', x: out.x, y: y, 'text-anchor': anchor}, s.label));
-    const ms = svg('text', {class: 'node-ms', x: out.x, y: y + 13, 'text-anchor': anchor});
-    g.append(ms);
-    nodesEl.append(g);
-    nodes[s.key] = {g, ms};
-  });
+function link(childKey, x1, y1, x2, y2, extra, mid) {
+  const path = svg('path', {class: 'link' + (extra || ''), d: elbow(x1, y1, x2, y2, mid)});
+  linksEl.append(path);
+  (links[childKey] = links[childKey] || []).push(path);
+}
+
+function drawTree(agents) {
+  linksEl.replaceChildren();
+  boxesEl.replaceChildren();
+  for (const k of Object.keys(parts)) delete parts[k];
+  for (const k of Object.keys(links)) delete links[k];
+
+  const byName = Object.fromEntries(agents.map(a => [a.name, a]));
+
+  // Each specialist gets a band tall enough for its own tools.
+  let y = TOP, bands = {};
+  for (const name of SPECIALISTS) {
+    const tools = (byName[name] || {tools: []}).tools;
+    const h = Math.max(BOX_H, BOX_H + (tools.length ? 6 + tools.length * (TOOL_H + TOOL_GAP) : 0));
+    bands[name] = {y: y, h: h, tools: tools};
+    y += h + BAND_GAP;
+  }
+  const total = y - BAND_GAP + TOP;
+  treeEl.setAttribute('viewBox', `0 0 752 ${total}`);
+  const middle = TOP + (total - 2 * TOP) / 2;
+
+  drawBox('message', COL.msg, middle - BOX_H / 2, W.msg, 'message', 'what you typed', ICONS.message);
+  const triage = drawBox('triage', COL.triage, middle - BOX_H / 2, W.triage, 'triage',
+                     'picks the route', ICONS.triage);
+  link('triage', COL.msg + W.msg, middle, COL.triage, middle);
+
+  const reply = drawBox('reply', COL.reply, middle - BOX_H / 2, W.reply, 'reply',
+                    'joined in code', ICONS.reply);
+
+  for (const name of SPECIALISTS) {
+    const band = bands[name];
+    const cy = band.y + BOX_H / 2;
+    drawBox(name, COL.agent, band.y, W.agent, name,
+        (byName[name] || {}).model || '', ICONS[name]);
+    link(name, COL.triage + W.triage, middle, COL.agent, cy);
+    link(name + '>reply', COL.agent + W.agent, cy, COL.reply, middle, '', COL.reply - 26);
+
+    band.tools.forEach((tool, i) => {
+      const ty = band.y + BOX_H + 6 + i * (TOOL_H + TOOL_GAP);
+      const key = name + '.' + tool.name;
+      toolBox(key, name, COL.agent + 26, ty, tool.name, tool.backend);
+      link(key, COL.agent + 13, band.y + BOX_H, COL.agent + 26, ty + TOOL_H / 2, ' tool-link');
+    });
+  }
+  return {triage, reply};
 }
 
 function setProgress(done, total) {
   const pct = total ? Math.min(100, Math.round(100 * done / total)) : 0;
-  pctEl.textContent = pct;
-  ringFill.setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
-  ringFill.classList.toggle('safety', sawSafety);
+  turnMsEl.dataset.pct = pct;
 }
 
 function step(who, key, what, state, ms) {
@@ -444,31 +489,49 @@ function step(who, key, what, state, ms) {
   // says "thinking" and then "thinking · 612 tokens", and keying on the text
   // left both of them on screen.
   const id = who + '|' + key;
-  let li = toolLines[id];
+  let li = lines[id];
   if (!li) {
     li = el('li');
     li.append(el('span', 'who', who), el('span', 'what', what), el('span', 't', ''));
     if (stepsEl.querySelector('.none')) stepsEl.replaceChildren();
     stepsEl.append(li);
-    toolLines[id] = li;
+    lines[id] = li;
   }
   li.className = state || '';
   li.children[1].textContent = what;
   li.lastElementChild.textContent = ms === undefined ? '' : dur(ms);
-  stepsEl.scrollTop = stepsEl.scrollHeight;
+}
+
+function mark(key, state) {
+  const p = parts[key];
+  if (!p) return;
+  const base = key.includes('.') ? 'tool' : 'step';
+  p.g.setAttribute('class', base + ' ' + state);
+}
+
+function light(key) {
+  for (const path of links[key] || []) {
+    path.setAttribute('class', path.getAttribute('class').replace(' taken', '').replace(' safety', '')
+                               + ' taken' + (sawSafety ? ' safety' : ''));
+  }
 }
 
 function resetPanel() {
-  for (const {g, ms} of Object.values(nodes)) { g.setAttribute('class', 'node'); ms.textContent = ''; }
-  for (const edge of edgesEl.children) edge.setAttribute('class', 'edge');
-  for (const k of Object.keys(toolLines)) delete toolLines[k];
-  stepsEl.replaceChildren(el('li', '', ''));
+  for (const [key, p] of Object.entries(parts)) {
+    p.g.setAttribute('class', key.includes('.') ? 'tool' : 'step');
+    p.ms.textContent = '';
+  }
+  for (const group of Object.values(links)) {
+    for (const path of group) path.setAttribute('class', path.getAttribute('class').includes('tool-link')
+      ? 'link tool-link' : 'link');
+  }
+  for (const k of Object.keys(lines)) delete lines[k];
+  stepsEl.replaceChildren(el('li'));
   stepsEl.firstChild.append(el('span', 'none', 'reading your message…'));
   routeEl.className = '';
   routeEl.textContent = 'reading your message…';
   expected = 5; finished = 0; sawSafety = false;
-  setProgress(0, expected);
-  ringSub.textContent = 'working…';
+  mark('message', 'done');
 
   const started = Date.now();
   clearInterval(tick);
@@ -479,68 +542,46 @@ function resetPanel() {
 function finishPanel(started, ok) {
   clearInterval(tick);
   tick = null;
-  turnMsEl.textContent = ((Date.now() - started) / 1000).toFixed(1) + 's';
-  if (ok) {
-    mark('reply', 'done');
-    lightEdge('reply');
-    finished = expected;
-    setProgress(finished, expected);
-    ringSub.textContent = 'answered in ' + ((Date.now() - started) / 1000).toFixed(1) + 's';
-  } else {
-    ringSub.textContent = 'stopped';
-  }
-}
-
-function mark(key, state) {
-  const n = nodes[key];
-  if (n) n.g.setAttribute('class', 'node ' + state);
-}
-
-function lightEdge(toKey) {
-  for (const edge of edgesEl.children) {
-    if (edge.dataset.to === toKey) edge.setAttribute('class', 'edge taken' + (sawSafety ? ' safety' : ''));
-  }
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  turnMsEl.textContent = secs + 's';
+  if (ok) { mark('reply', 'done'); }
 }
 
 function onActivity(ev) {
   if (ev.kind === 'route') {
     const running = ev.agents || [];
     sawSafety = !!ev.safety;
-    // Triage runs unless it was skipped; the reply is always the last step.
     expected = (ev.triage_skipped || !running.length ? 0 : 1) + running.length + 1;
-    for (const s of STEPS) {
-      if (s.key === 'reply') continue;
-      if (s.key === 'triage') { if (ev.triage_skipped || !running.length) mark('triage', 'skipped'); continue; }
-      if (!running.includes(s.key)) mark(s.key, 'skipped');
+    if (ev.triage_skipped || !running.length) mark('triage', 'skipped'); else light('triage');
+    for (const name of SPECIALISTS) {
+      if (!running.includes(name)) mark(name, 'skipped');
+      else { light(name); light(name + '>reply'); }
     }
     setProgress(finished, expected);
 
-    const lines = [];
-    if (ev.cached) lines.push('Answered from the cache — no agent ran, no tokens spent.');
-    else if (!running.length) lines.push(ev.reason || 'Answered without an agent.');
-    else lines.push(running.join(' → '));
-    if (ev.safety) lines.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
-    if (ev.ticket_stands) lines.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
-    if (ev.triage_skipped) lines.push('Triage skipped: a fault code and nothing else.');
-    else if (ev.reason && running.length) lines.push(ev.reason);
-    routeEl.textContent = lines.join('  ·  ');
+    const said = [];
+    if (ev.cached) said.push('Answered from the cache — no agent ran, no tokens spent.');
+    else if (!running.length) said.push(ev.reason || 'Answered without an agent.');
+    else said.push(running.join(' + '));
+    if (ev.safety) said.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
+    if (ev.ticket_stands) said.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
+    if (ev.triage_skipped) said.push('Triage skipped: a fault code and nothing else.');
+    else if (ev.reason && running.length) said.push(ev.reason);
+    routeEl.textContent = said.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
-    step('router', 'route', running.length ? running.join(' → ') : 'answered without an agent', 'done');
-    if (ev.cached || !running.length) ringSub.textContent = 'no agent needed';
+    step('router', 'route', running.length ? running.join(' + ') : 'answered without an agent', 'done');
     return;
   }
 
   if (ev.kind === 'agent') {
     if (ev.state === 'working') {
       mark(ev.name, 'busy');
-      lightEdge(ev.name);
-      ringSub.textContent = ev.name + ' is working';
       step(ev.name, 'turn', 'thinking', 'running');
     } else {
       const bad = ev.ok === false || ev.state === 'failed';
       mark(ev.name, bad ? 'failed' : 'done');
-      const n = nodes[ev.name];
-      if (n && ev.ms) n.ms.textContent = dur(ev.ms);
+      const p = parts[ev.name];
+      if (p && ev.ms) p.ms.textContent = dur(ev.ms);
       finished = Math.min(expected - 1, finished + 1);
       setProgress(finished, expected);
       step(ev.name, 'turn', ev.tokens ? 'thinking · ' + ev.tokens + ' tokens' : 'thinking',
@@ -550,10 +591,15 @@ function onActivity(ev) {
   }
 
   if (ev.kind === 'tool') {
+    const key = ev.agent + '.' + ev.name;
     if (ev.state === 'running') {
-      ringSub.textContent = ev.name.replace(/_/g, ' ');
+      mark(key, 'running');
+      light(key);
       step(ev.agent, ev.name, ev.name, 'running');
     } else {
+      mark(key, ev.failed ? 'failed' : 'done');
+      const p = parts[key];
+      if (p) p.ms.textContent = dur(ev.ms || 0);
       step(ev.agent, ev.name, ev.name, ev.failed ? 'failed' : 'done', ev.ms);
     }
   }
@@ -563,9 +609,8 @@ function drawAgentReference(agents) {
   agentListEl.replaceChildren();
   for (const a of agents) {
     const card = el('div', 'agent-card');
-    const icon = (STEPS.find(s => s.key === a.name) || {}).icon || '';
     const h = el('h4');
-    h.append(el('span', '', icon + ' ' + a.name));
+    h.append(el('span', '', (ICONS[a.name] || '') + ' ' + a.name));
     if (!a.deployed) h.append(el('span', 'not-live', 'not deployed'));
     card.append(h, el('p', 'agent-purpose', a.purpose), el('p', 'agent-role', a.role));
 
@@ -576,9 +621,9 @@ function drawAgentReference(agents) {
 
     if (a.tools.length) {
       const row = el('div', 'tools');
-      for (const t of a.tools) {
-        const chip = el('span', 'tool', t.name);
-        chip.title = t.does;
+      for (const tool of a.tools) {
+        const chip = el('span', 'tool-chip', tool.name + ' → ' + tool.backend);
+        chip.title = tool.does;
         row.append(chip);
       }
       card.append(row);
@@ -589,10 +634,11 @@ function drawAgentReference(agents) {
   }
 }
 
-drawRing();
 fetch('/agents')
   .then(r => r.json())
   .then(j => {
+    drawTree(j.agents || []);
+    mark('message', 'done');
     drawAgentReference(j.agents || []);
     agentsFootEl.textContent =
       'Routing is decided in code, not by an agent calling other agents, so every step above is a value the service logged.';

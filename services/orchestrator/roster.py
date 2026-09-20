@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 
 from . import tools
@@ -45,6 +46,23 @@ ROLE = {
     "escalation": "Runs last, after the others, so it can summarise what was said.",
 }
 
+# Where a tool call actually goes. Worth showing beside the tool name: "booking
+# calls get_available_slots" says nothing about the fact that the call leaves
+# this process, speaks MCP to Zoho's server, and lands in the workshop's real
+# calendar. The booking row is read at call time, not hard-coded, because
+# BOOKING_BACKEND switches it between Zoho and a local file.
+SEARCH_BACKEND = "Azure AI Search"
+LOCAL_BACKEND = "local store"
+
+
+def _backend_of(tool: str) -> str:
+    if tool == "search_service_docs":
+        return SEARCH_BACKEND
+    if tool == "raise_ticket":
+        return LOCAL_BACKEND
+    return "Zoho Bookings · MCP" if os.getenv("BOOKING_BACKEND", "file") == "zoho" else LOCAL_BACKEND
+
+
 _ROSTER = TimedCache(600, name="roster")
 
 
@@ -71,7 +89,11 @@ def load(deployed: dict | None = None) -> dict:
     agents = _ROSTER.get_or_call("agents", _load_definitions)
     live = deployed or {}
     return {
-        "agents": [{**a, "deployed": a["name"] in live} for a in agents],
+        "agents": [
+            {**a, "deployed": a["name"] in live,
+             "tools": [{**t, "backend": _backend_of(t["name"])} for t in a["tools"]]}
+            for a in agents
+        ],
         "count": len(agents),
     }
 
@@ -90,7 +112,7 @@ def _load_definitions() -> list[dict]:
             "role": ROLE.get(name, ""),
             "returns": "JSON" if d.get("response_format") == "json_object" else "an answer",
             "tools": [
-                {"name": t, "does": _first_sentence(_tool_description(t))}
+                {"name": t, "does": _first_sentence(_tool_description(t)), "backend": _backend_of(t)}
                 for t in d.get("tools") or []
             ],
         })
