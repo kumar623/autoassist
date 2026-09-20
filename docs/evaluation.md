@@ -792,3 +792,27 @@ None of this is fixed yet. It is written down because a number you can point at
 is worth more than an impression, and because the same file is the baseline for
 the next question: whether a classifier with calibrated probabilities does better
 than a chat model asked for JSON. See `evals/compare_triage.py`.
+
+**The Jev half has not run.** TypeSafe is waitlist-only as of 20 September 2026:
+`console.typesafe.ai` is a sign-in page and there is no self-service key. So
+`evals/compare_triage.py` exists, is tested, and reports the triage side — the
+numbers above came out of it — but the comparison it was written for is parked
+until a key exists. It degrades to "Jev was not asked" rather than failing,
+which is the only reason the baseline above could be measured at all.
+
+Worth recording for whenever that changes, because the decision rule should be
+set before the data arrives, not after:
+
+> Jev replaces the safety judgement only if it holds recall at 1.0 while cutting
+> false alarms. Recall traded for precision is a loss whatever it costs.
+
+That is the same rule that rejected `gpt-4.1-nano` for triage on 20 September —
+faster, and better at routing, and still rejected because it was more anxious
+about safety. On this step, speed has never been the question.
+
+TypeSafe's own homepage claims 193.6x faster and 444.6x cheaper "based on
+workflows for System One tasks", and "zero hallucinations". The second is a
+category claim rather than a quality one: a model that returns a probability
+instead of prose cannot hallucinate a citation, but it can be confidently wrong,
+which their own FAQ says plainly. Neither claim is about this routing set, which
+is exactly why the comparison was built rather than assumed.
