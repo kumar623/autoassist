@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 # every page view would be waste. Ten minutes keeps a fresh ingest visible soon.
 CACHE_SECONDS = 600
 _cache: dict = {"at": 0.0, "data": None}
+# Guards the two dict operations on _cache and nothing else. Never held across
+# the search - see load().
 _lock = threading.Lock()
 
 # A search returns at most 1000 results. The library is 370 pieces today; this
@@ -152,17 +154,39 @@ def build(pieces: list[dict]) -> dict:
 
 
 def load() -> dict:
-    """The library, from the search index, cached for CACHE_SECONDS."""
+    """The library, from the search index, cached for CACHE_SECONDS.
+
+    The search runs OUTSIDE the lock, which is held only for the dict read and
+    the dict write - the same rule as cache.TimedCache, and for the same reason.
+    /library is a sync endpoint, so every reader holds one of Starlette's 40
+    threadpool threads for as long as this takes, and it is exempt from the rate
+    limiter (decision 009). While the lock spanned the search, a fetch that
+    failed handed the lock to the next reader, which started its own full
+    attempt from the front of the queue: six readers on a cold cache cost six
+    fetches end to end, not one. azure_http retries a 5xx up to three times at
+    up to 20s, so each of those is worth up to a minute of a held thread. The
+    threadpool empties, /health - sync too - cannot get a thread, the Dockerfile
+    HEALTHCHECK fails its three 4s tries, and the container is restarted, all
+    because people opened the Library tab on a replica that had just scaled from
+    zero.
+
+    Two readers arriving on a cold cache therefore both search, rather than one
+    waiting on the other. That is the trade, taken deliberately: a duplicate
+    search costs a fraction of a second against an index that changes only when
+    someone runs ingest, and blocking costs a thread that /health needs.
+    """
     with _lock:
-        if _cache["data"] is not None and time.time() - _cache["at"] < CACHE_SECONDS:
-            return _cache["data"]
+        cached, at = _cache["data"], _cache["at"]
+    if cached is not None and time.time() - at < CACHE_SECONDS:
+        return cached
 
-        fields = ["doc_type", "source_file", "section", "page", "severity", "title", "content"]
-        pieces = retrieval.fetch_all(fields, top=MAX_PIECES)
-        if len(pieces) >= MAX_PIECES:
-            log.warning("library read %d pieces, the most one search returns; some are missing", len(pieces))
+    fields = ["doc_type", "source_file", "section", "page", "severity", "title", "content"]
+    pieces = retrieval.fetch_all(fields, top=MAX_PIECES)
+    if len(pieces) >= MAX_PIECES:
+        log.warning("library read %d pieces, the most one search returns; some are missing", len(pieces))
 
-        data = build(pieces)
+    data = build(pieces)
+    with _lock:
         _cache.update(at=time.time(), data=data)
-        log.info("library loaded: %s", data["counts"])
-        return data
+    log.info("library loaded: %s", data["counts"])
+    return data
