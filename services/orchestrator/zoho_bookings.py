@@ -45,6 +45,9 @@ QUIRKS, ALL FOUND BY TESTING AGAINST THE LIVE ACCOUNT (20 Sep 2026)
   - Times are "dd-MMM-yyyy HH:mm:ss", dates "dd-MMM-yyyy", slots "10:30 AM".
   - Cancelling is updateAppointmentStatus action="cancel"; the status reads
     "cancel" afterwards.
+  - FETCH_AVAILABILITY takes at most SEVEN dates. An eighth is refused with
+    {"status": "failure", "message": "Maximum Date Size Exceeded"} - in the
+    body, not as an error, so it has to be read for rather than waited for.
 """
 
 from __future__ import annotations
@@ -190,6 +193,36 @@ def _slots_on_now(day: date) -> list[dict]:
     return out
 
 
+# Zoho refuses a FETCH_AVAILABILITY carrying more than seven dates. SEARCH_DAYS
+# is 21, so the question is asked a week at a time.
+_MAX_DATE_LIST = 7
+
+
+def _opens_on(days: list[date]) -> dict[date, bool]:
+    """Which of these days the workshop opens at all, a week per call.
+
+    The refusal is checked for, not merely survived. Zoho reports "Maximum Date
+    Size Exceeded" inside a normal-looking body, so a refusal read as data says
+    "no day is open" - which is indistinguishable from a full calendar. That is
+    how asking for the next free slot came to answer "nothing for three weeks"
+    on the live app rather than failing out loud (20 Sep).
+    """
+    out: dict[date, bool] = {}
+    for start in range(0, len(days), _MAX_DATE_LIST):
+        week = days[start:start + _MAX_DATE_LIST]
+        result = _AVAILABILITY.get_or_call(("open-days", week[0], week[-1]), lambda w=week: _call(
+            "fetchAvailability_or_getRecentAppointment", {"body": {"data": json.dumps({
+                "action": "FETCH_AVAILABILITY", "service_id": SERVICE_ID,
+                "date_list": [d.strftime(_DAY) for d in w],
+            })}}))
+        refused = _failed(result)
+        if refused:
+            raise ZohoUnavailable(refused)
+        for d in week:
+            out[d] = result.get(d.strftime(_DAY)) is True
+    return out
+
+
 def get_slots(on_date: str | None = None, days: int = 3) -> dict:
     """Free slots from Zoho, for one date or the next few days that have any."""
     today = date.today()
@@ -202,30 +235,43 @@ def get_slots(on_date: str | None = None, days: int = 3) -> dict:
             if wanted < today:
                 return {"ok": False, "error": f"{wanted.isoformat()} is in the past."}
             slots = _slots_on(wanted)
-            if not slots:
-                return {"ok": True, "slots": [], "count": 0,
-                        "note": f"The workshop has nothing free on {wanted.strftime('%A %d %B')}."}
-            return {"ok": True, "slots": slots, "count": len(slots)}
+            if slots:
+                return {"ok": True, "slots": slots, "count": len(slots)}
 
-        # No date given: the next few days that have anything free. One call
-        # asks Zoho which days are open at all, so only those are looked up.
+            # An empty list means either "shut that day" or "open and full", and
+            # they are not the same answer. Told "no free slots on Saturday" the
+            # customer asks about the Saturday after; told the workshop does not
+            # open on Saturdays, they pick another day. Asked only when the day
+            # came back empty, so an ordinary answer still costs one call.
+            if not _opens_on([wanted])[wanted]:
+                return {"ok": True, "slots": [], "count": 0, "closed": True,
+                        "note": f"The workshop is closed on {wanted.strftime('%A %d %B')} - it does "
+                                f"not open on {wanted.strftime('%A')}s at all. Say so and offer "
+                                "another day; do not describe this as being fully booked."}
+            return {"ok": True, "slots": [], "count": 0,
+                    "note": f"The workshop is open on {wanted.strftime('%A %d %B')} but has nothing "
+                            "free. Offer another day."}
+
+        # No date given: the next few days that have anything free. The opening
+        # days are asked for a week at a time and only while they are still
+        # needed, so a customer who takes the first slot costs one extra call.
         ahead = [today + timedelta(days=n) for n in range(1, SEARCH_DAYS + 1)]
-        open_days = _AVAILABILITY.get_or_call(("open-days", today), lambda: _call(
-            "fetchAvailability_or_getRecentAppointment", {"body": {"data": json.dumps({
-            "action": "FETCH_AVAILABILITY", "service_id": SERVICE_ID,
-            "date_list": [d.strftime(_DAY) for d in ahead],
-        })}}))
         slots: list[dict] = []
         found_days = 0
-        for d in ahead:
+        for start in range(0, len(ahead), _MAX_DATE_LIST):
             if found_days >= days:
                 break
-            if open_days.get(d.strftime(_DAY)) is not True:
-                continue
-            day_slots = _slots_on(d)
-            if day_slots:
-                slots.extend(day_slots)
-                found_days += 1
+            week = ahead[start:start + _MAX_DATE_LIST]
+            opens = _opens_on(week)
+            for d in week:
+                if found_days >= days:
+                    break
+                if not opens.get(d):
+                    continue
+                day_slots = _slots_on(d)
+                if day_slots:
+                    slots.extend(day_slots)
+                    found_days += 1
         return {"ok": True, "slots": slots, "count": len(slots)}
     except ZohoUnavailable as e:
         log.warning("Zoho unavailable while listing slots: %s", e)

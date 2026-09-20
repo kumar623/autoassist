@@ -55,10 +55,18 @@ MAX_HISTORY_CHARS = 600
 # fire on. "ok" and "yes" are deliberately absent - after a question they are
 # answers, and need the agents.
 SMALL_TALK = re.compile(
-    r"^\s*(hi|hello|hey|hiya|good (morning|afternoon|evening)|"
+    r"^\s*(?:"
+    r"(?P<greeting>hi|hello|hey|hiya|good (?:morning|afternoon|evening)|"
     r"thanks|thank you|thanks a lot|thank you so much|thx|cheers|bye|goodbye)"
-    r"(\s+(there|again|very much))?"
-    r"([\s,!.]+how are (you|u)( doing)?( today)?)?[\s!.,?]*$",
+    r"(?:\s+(?:there|again|very much))?"
+    r"(?:[\s,!.]+(?:how are (?:you|u)(?: doing)?(?: today)?|how(?:'s| is| are) (?:it|things|you) going))?"
+    # On its own, not only after a greeting. "how are you" used to go to triage
+    # and then diagnostics, which searched the service library for it and
+    # answered "the library does not cover the question 'how are you'" - 3,648
+    # tokens and 7.3 seconds, on the live app, to be unhelpful (20 Sep).
+    r"|(?P<pleasantry>how are (?:you|u)(?: doing)?(?: today)?|how(?:'s| is| are) (?:it|things|you) going|"
+    r"are you (?:there|ok|okay))"
+    r")[\s!.,?]*$",
     re.IGNORECASE,
 )
 GREETING_REPLY = (
@@ -66,6 +74,10 @@ GREETING_REPLY = (
     "light, or ask to book a service."
 )
 THANKS_REPLY = "You're welcome. Is there anything else I can help with?"
+PLEASANTRY_REPLY = (
+    "I'm well, thank you. Tell me what your car is doing, ask about a fault code "
+    "or a warning light, or ask to book a service."
+)
 BYE_REPLY = "Goodbye. Get in touch any time."
 
 # What booking is told when it picks up a conversation part-way. Each rule is
@@ -453,7 +465,9 @@ def small_talk_reply(message: str) -> str | None:
     m = SMALL_TALK.match(message)
     if not m:
         return None
-    word = m.group(1).lower()
+    if m.group("pleasantry"):
+        return PLEASANTRY_REPLY
+    word = m.group("greeting").lower()
     if word in ("bye", "goodbye"):
         return BYE_REPLY
     return GREETING_REPLY if word.startswith(("hi", "hello", "hey", "good")) else THANKS_REPLY

@@ -1007,6 +1007,44 @@ def test_brevity_is_asked_per_request_not_in_the_agents_prompt():
     assert "80 words" not in _context_for("booking", "book me", _decision(["booking"]), [])
 
 
+# ------------------------------------------------------ pleasantries alone
+
+@pytest.mark.parametrize("message", [
+    "how are you", "How are you?", "how are u", "how are you doing",
+    "how are you doing today", "how is it going", "how's it going",
+    "are you ok", "are you there",
+])
+def test_a_pleasantry_on_its_own_needs_no_agent(message):
+    """On the live app "how are you" went to triage, then to diagnostics, which
+    searched the service library for it and answered "the library does not cover
+    the question 'how are you'" - 3,648 tokens and 7.3 seconds to be unhelpful."""
+    assert _router.small_talk_reply(message) == _router.PLEASANTRY_REPLY
+
+
+def test_a_greeting_with_a_pleasantry_is_still_a_greeting():
+    assert _router.small_talk_reply("hi, how are you doing today") == _router.GREETING_REPLY
+
+
+@pytest.mark.parametrize("message", [
+    "how long does a service take",
+    "how are the brakes on my car",
+    "how are you going to fix my clutch",
+    "my brakes have failed",
+    "how much are you charging",
+])
+def test_a_real_question_is_not_a_pleasantry(message):
+    """The cost of getting this wrong is a customer's real question answered with
+    "I'm well, thank you"."""
+    assert _router.small_talk_reply(message) is None
+
+
+def test_a_pleasantry_is_answered_without_calling_azure(monkeypatch):
+    monkeypatch.setattr(_router, "ask", lambda *a, **k: pytest.fail("no agent should run"))
+    r = _router.handle(None, "how are you", agent_ids={"triage": "t", **IDS})
+    assert r.reply == _router.PLEASANTRY_REPLY
+    assert r.total_tokens == 0
+    assert r.turns == []
+
 # ---------------------------------------------------------------- the warning belongs where it belongs
 #
 # Live app, 20 Sep: "What does P0420 mean and is it safe to drive?" - the page's
