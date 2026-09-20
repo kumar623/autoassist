@@ -3,6 +3,7 @@
 Endpoints:
     GET  /            the chat page
     POST /chat        {"message": "...", "history": [...]} -> {"reply": "...", "trace": [...]}
+    POST /chat/stream same, but the answer arrives as it is written (SSE)
     GET  /library     every document the assistant can cite, from the index
     GET  /health      liveness  - is the process up?
     GET  /ready       readiness - can it actually serve? (checks Azure)
@@ -17,9 +18,12 @@ one.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
+import queue
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -27,7 +31,7 @@ from typing import Literal
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import library, telemetry
@@ -195,6 +199,11 @@ def chat(req: ChatRequest) -> ChatResponse:
         log.exception("chat failed")
         raise HTTPException(500, detail=f"{type(e).__name__}: {e}") from e
 
+    return _chat_response(result, started)
+
+
+def _chat_response(result, started: float) -> ChatResponse:
+    """Count one handled message and shape the reply. Used by both endpoints."""
     decision = result.decision
     METRICS["total_tokens"] += result.total_tokens
     METRICS["total_ms"] += int((time.time() - started) * 1000)
@@ -214,6 +223,79 @@ def chat(req: ChatRequest) -> ChatResponse:
         ms=result.duration_ms,
         trace=result.trace(),
     )
+
+
+@app.post("/chat/stream")
+def chat_stream(req: ChatRequest):
+    """The same answer as /chat, sent as it is written.
+
+    A specialist takes 5-8s to write; waiting for all of it before showing
+    anything is most of what makes the app feel slow. The events:
+
+        {"type": "status", "text": "..."}  what is happening while they wait
+        {"type": "delta", "text": "..."}   a fragment of the answer
+        {"type": "done",  ...}             the whole ChatResponse, with the trace
+        {"type": "error", "detail": "..."}
+
+    Safety-flagged messages are not streamed - see router._can_stream - so the
+    reply still arrives in one piece there, after the checks have run.
+    """
+    client = STATE.get("client")
+    if client is None:
+        raise HTTPException(503, detail="service is not connected to Azure")
+
+    METRICS["requests"] += 1
+    started = time.time()
+    fragments: queue.Queue = queue.Queue()
+    DONE = object()
+
+    def work():
+        try:
+            result = routing.handle(
+                client, req.message.strip(), timeout=REQUEST_TIMEOUT, agent_ids=STATE["agent_ids"],
+                history=[h.model_dump() for h in req.history],
+                on_delta=fragments.put, on_status=lambda text: fragments.put(("status", text)),
+            )
+            fragments.put(("done", result))
+        except Exception as e:  # noqa: BLE001
+            log.exception("streamed chat failed")
+            fragments.put(("error", f"{type(e).__name__}: {e}"))
+        finally:
+            fragments.put(DONE)
+
+    threading.Thread(target=work, name="chat-stream", daemon=True).start()
+
+    def events():
+        streamed = ""
+        while True:
+            item = fragments.get()
+            if item is DONE:
+                return
+            if isinstance(item, str):  # a fragment of the answer
+                streamed += item
+                yield _sse({"type": "delta", "text": item})
+                continue
+            kind, payload = item
+            if kind == "status":
+                yield _sse({"type": "status", "text": payload})
+                continue
+            if kind == "error":
+                METRICS["failures"] += 1
+                yield _sse({"type": "error", "detail": payload})
+                continue
+            body = _chat_response(payload, started)
+            # The customer has already read the streamed text; sending it again
+            # would duplicate it, so `reply` is only included when nothing was
+            # streamed (several agents, or a safety answer held back for checks).
+            yield _sse({"type": "done", **body.model_dump(),
+                        "reply": "" if streamed.strip() else body.reply})
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @app.get("/library")

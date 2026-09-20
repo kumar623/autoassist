@@ -25,6 +25,7 @@ hand is security code with nothing to gain.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -135,3 +136,58 @@ class FoundryAgents:
 
     def cancel_run(self, thread_id: str, run_id: str) -> dict:
         return self._call("POST", f"/threads/{thread_id}/runs/{run_id}/cancel")
+
+    # ------------------------------------------------------------ streaming
+
+    def stream_thread_and_run(self, agent_id: str, content: str):
+        """Start a run and yield (event, data) as Azure sends them.
+
+        The customer waits 5-8s for a specialist to write an answer they cannot
+        see until it is finished (measured 20 Sep). Streaming shows the words as
+        they arrive - the first of them in about 2s.
+        """
+        return self._stream(
+            "/threads/runs",
+            {"assistant_id": agent_id, "stream": True,
+             "thread": {"messages": [{"role": "user", "content": content}]}},
+        )
+
+    def stream_tool_outputs(self, thread_id: str, run_id: str, outputs: list[dict]):
+        """Hand back tool results and keep streaming the same run."""
+        return self._stream(
+            f"/threads/{thread_id}/runs/{run_id}/submit_tool_outputs",
+            {"tool_outputs": outputs, "stream": True},
+        )
+
+    def _stream(self, path: str, body: dict):
+        """Server-sent events from one POST, as (event name, parsed data).
+
+        No retries: a half-written answer cannot be replayed, and the caller
+        already has a timeout. A rejected token is refreshed once, before the
+        stream starts.
+        """
+        url = f"{self.endpoint}{path}"
+        params = {"api-version": API_VERSION}
+        for attempt in (1, 2):
+            headers = {**self._auth(), "Accept": "text/event-stream", "Content-Type": "application/json"}
+            with self._http.stream("POST", url, params=params, headers=headers, json=body) as r:
+                if r.status_code == 401 and attempt == 1:
+                    self._token = None  # force a new one, then try again
+                    r.close()
+                    continue
+                if r.status_code >= 400:
+                    r.read()
+                    raise azure_http.AzureError(r.status_code, r.text[:300], "POST", url)
+                event = ""
+                for line in r.iter_lines():
+                    if line.startswith("event:"):
+                        event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:"):
+                        raw = line.split(":", 1)[1].strip()
+                        if raw == "[DONE]":
+                            return
+                        try:
+                            yield event, json.loads(raw)
+                        except ValueError:
+                            continue
+                return

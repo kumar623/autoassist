@@ -82,6 +82,9 @@
     font-size: 12px; padding: 4px 10px; font-weight: 400;
   }
   .hint { color: var(--muted); font-size: 13px; }
+  .bubble.empty { display: none; }
+  .working { color: var(--muted); font-size: 13px; font-style: italic; }
+  .working::after { content: '…'; }
 
   /* Tabs: Chat and Library */
   [hidden] { display: none !important; }
@@ -250,33 +253,80 @@ async function askServer(text) {
   add('You', text);
   box.value = '';
   send.disabled = true;
-  const col = add('AA', '…');
+  const col = add('AA', '');
   const bubble = col.firstElementChild;
+  bubble.classList.add('empty');   // no empty speech bubble while they wait
+  const working = document.createElement('div');
+  working.className = 'working';
+  working.textContent = 'thinking';
+  col.appendChild(working);
+  const scroll = () => { log.parentElement.scrollTop = log.parentElement.scrollHeight; };
+  let streamed = '';
+  let done = null;
 
   try {
-    const r = await fetch('/chat', {
+    // The answer arrives as it is written. A specialist takes 5-8s to write one,
+    // and waiting for all of it before showing anything is most of what made
+    // this feel slow. Safety answers are not streamed: they are checked first.
+    const r = await fetch('/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT)})
     });
-    if (!r.ok) {
+    if (!r.ok || !r.body) {
       const err = await r.json().catch(() => ({detail: r.statusText}));
+      bubble.classList.remove('empty');
       bubble.textContent = 'Something went wrong: ' + (err.detail || r.status);
       return;
     }
-    const data = await r.json();
-    bubble.textContent = data.reply;
-    // Only exchanges that got a real answer. A failed turn is not something the
-    // customer was told, so it should not be context for the next one.
-    history.push({role: 'customer', text}, {role: 'assistant', text: data.reply});
-    if (data.safety) bubble.classList.add('safety');
-    meta(col, data);
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const {value, done: finished} = await reader.read();
+      if (finished) break;
+      buffer += decoder.decode(value, {stream: true});
+      let cut;
+      while ((cut = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        if (!frame.startsWith('data:')) continue;
+        let ev;
+        try { ev = JSON.parse(frame.slice(5).trim()); } catch (e) { continue; }
+        if (ev.type === 'status') {
+          working.textContent = ev.text;
+          scroll();
+        } else if (ev.type === 'delta') {
+          if (!streamed) { bubble.textContent = ''; bubble.classList.remove('empty'); working.remove(); }
+          streamed += ev.text;
+          bubble.textContent = streamed;
+          scroll();
+        } else if (ev.type === 'error') {
+          bubble.classList.remove('empty');
+          bubble.textContent = 'Something went wrong: ' + ev.detail;
+        } else if (ev.type === 'done') {
+          done = ev;
+        }
+      }
+    }
+
+    if (done) {
+      bubble.classList.remove('empty');
+      if (done.reply) bubble.textContent = done.reply;   // was not streamed
+      if (done.safety) bubble.classList.add('safety');
+      history.push({role: 'customer', text}, {role: 'assistant', text: done.reply || streamed});
+      meta(col, done);
+    } else if (!streamed) {
+      bubble.textContent = 'Something went wrong: the answer did not arrive.';
+    }
   } catch (e) {
-    bubble.textContent = 'Could not reach the service. Is it running?';
+    if (!streamed) { bubble.classList.remove('empty'); bubble.textContent = 'Could not reach the service. Is it running?'; }
   } finally {
+    working.remove();
     send.disabled = false;
     box.focus();
-    log.parentElement.scrollTop = log.parentElement.scrollHeight;
+    scroll();
   }
 }
 
