@@ -89,3 +89,42 @@ def test_a_broken_definition_file_is_skipped(monkeypatch, tmp_path):
 
     loaded = roster.load()
     assert [a["name"] for a in loaded["agents"]] == ["diagnostics"]
+
+
+# ------------------------------------------------- where a tool call really goes
+
+
+def test_every_tool_says_where_it_goes():
+    """"booking calls get_available_slots" says nothing about the call leaving
+    this process and landing in the workshop's real calendar."""
+    for a in roster.load()["agents"]:
+        for t in a["tools"]:
+            assert t["backend"], f"{a['name']}.{t['name']}"
+
+
+def test_the_search_tool_goes_to_azure_search():
+    diagnostics = roster.load()["agents"][1]
+    search = next(t for t in diagnostics["tools"] if t["name"] == "search_service_docs")
+    assert search["backend"] == roster.SEARCH_BACKEND
+
+
+def test_booking_tools_say_mcp_when_zoho_is_the_backend(monkeypatch):
+    monkeypatch.setenv("BOOKING_BACKEND", "zoho")
+    booking = roster.load()["agents"][2]
+    assert all("MCP" in t["backend"] for t in booking["tools"])
+
+
+def test_booking_tools_say_local_when_the_file_backend_is_in_use(monkeypatch):
+    """The panel has to follow BOOKING_BACKEND, not assume it."""
+    monkeypatch.setenv("BOOKING_BACKEND", "file")
+    booking = roster.load()["agents"][2]
+    assert all(t["backend"] == roster.LOCAL_BACKEND for t in booking["tools"])
+
+
+def test_the_backend_is_not_cached_from_an_earlier_call(monkeypatch):
+    """The definitions are cached for ten minutes; the backend is an env var and
+    can change under a running process when the revision changes."""
+    monkeypatch.setenv("BOOKING_BACKEND", "zoho")
+    assert "MCP" in roster.load()["agents"][2]["tools"][0]["backend"]
+    monkeypatch.setenv("BOOKING_BACKEND", "file")
+    assert "MCP" not in roster.load()["agents"][2]["tools"][0]["backend"]
