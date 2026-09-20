@@ -112,6 +112,29 @@ SAFETY_WORDS = re.compile(
 # is a list of free slots.
 BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule)\b", re.IGNORECASE)
 
+# A ticket reference, as escalation gives it to the customer. Once one has been
+# given, a human is already on the way and a second one is not a second helper -
+# it is the same advisor being called twice about the same car.
+#
+# This happened on the live app (20 Sep): "i have a problem with my gear
+# shifting" was flagged as a safety issue, and it stayed flagged for the rest of
+# the conversation - triage is told to judge the flag on the new message alone
+# and did not. Escalation therefore ran on every turn and raised a ticket on
+# every turn: TK-013051 for the symptom, TK-892738 for "i need to book
+# appointment", TK-953064 for "tomoroow". Three advisors' worth of work, and the
+# customer was told three different references for one problem.
+#
+# Fixed here rather than in escalation's prompt. The prompt already says what to
+# do with a ticket; what it cannot do is know one already exists, and asking a
+# model to remember across turns is how this went wrong in the first place.
+TICKET_REFERENCE = re.compile(r"\bTK-[0-9]{4,}\b")
+
+TICKET_STANDS = (
+    "A service advisor has already been asked to call you about this - ticket {reference} - "
+    "and someone will be in touch within the hour. If it cannot wait, please call the "
+    "workshop directly."
+)
+
 # Triage costs 2.0-2.7s of every reply - a quarter of it - to classify a message
 # (measured on the live app, 20 Sep). Some messages do not need classifying: a
 # fault code with nothing else in it is a diagnostics question, and no model is
@@ -434,6 +457,22 @@ def small_talk_reply(message: str) -> str | None:
     if word in ("bye", "goodbye"):
         return BYE_REPLY
     return GREETING_REPLY if word.startswith(("hi", "hello", "hey", "good")) else THANKS_REPLY
+
+
+def ticket_already_raised(history: list[dict] | None) -> str | None:
+    """The reference of a ticket this conversation has already been given, if any.
+
+    Read from the untrimmed history, not from _recent: that shortens long turns
+    to 600 characters, and a reference that fell off the end would mean a second
+    ticket for the same problem.
+    """
+    for turn in (history or [])[-MAX_HISTORY_TURNS:]:
+        if turn.get("role") != "assistant":
+            continue
+        found = TICKET_REFERENCE.search(str(turn.get("text") or ""))
+        if found:
+            return found.group(0)
+    return None
 
 
 def _recent(history: list[dict] | None, roles: tuple[str, ...] = ("customer", "assistant")) -> list[str]:
@@ -988,6 +1027,14 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
 
     # --- 2. specialists ---
     route = [s for s in decision.route() if s in ids]
+
+    # A human has already been called about this conversation. Calling them again
+    # every turn is what the live app did on 20 Sep - see TICKET_REFERENCE.
+    standing = ticket_already_raised(history) if "escalation" in route else None
+    if standing:
+        log.info("escalation skipped: ticket %s already stands for this conversation", standing)
+        route = [s for s in route if s != "escalation"]
+
     before = len(out.turns)  # triage's turn, or nothing when triage was skipped
 
     # Tell them what is happening BEFORE the pre-search: it takes ~0.7s, and
@@ -1022,6 +1069,8 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     # --- 3. check, then compose ---
     out.withheld = _withhold_reassurance(specialists, decision)
     out.reply = _compose(specialists, decision)
+    if standing:
+        out.reply = _carry_the_ticket_forward(out.reply, standing, decision, specialists)
     _note_throttling(specialists, out)
     out.duration_ms = int((time.time() - started) * 1000)
 
@@ -1031,6 +1080,22 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
         "handled in %dms: agents=%s tokens=%d",
         out.duration_ms, out.agents_used, out.total_tokens,
     )
+
+
+def _carry_the_ticket_forward(reply: str, reference: str, decision: TriageDecision,
+                              specialists: list[TurnResult]) -> str:
+    """Say the ticket still stands, in place of raising another one.
+
+    Written here rather than by an agent: it is one sentence of fact, it must
+    name the reference the customer was actually given, and a model asked to
+    repeat a reference is a model that can get a digit wrong.
+    """
+    stands = TICKET_STANDS.format(reference=reference)
+    if not any(t.answer.strip() for t in specialists):
+        # Escalation was the whole route - "I want to speak to someone". The
+        # safety warning still comes first when there is one.
+        return f"{SAFETY_FALLBACK}\n\n{stands}" if decision.safety else stands
+    return f"{stands}\n\n{reply}"
 
 
 def _note_throttling(specialists: list[TurnResult], out: RouterResult) -> None:
