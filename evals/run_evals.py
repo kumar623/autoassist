@@ -50,6 +50,10 @@ from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
 load_dotenv()
+# A case answered out of an earlier case's cached reply is not a measurement of
+# anything, and two runs an hour apart would not be comparable. Set before
+# router.py reads it at import.
+os.environ["ANSWER_CACHE_SECONDS"] = "0"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from services.orchestrator import router as routing  # noqa: E402

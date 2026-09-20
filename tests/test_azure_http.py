@@ -41,11 +41,48 @@ def test_an_empty_body_is_an_empty_dict():
     assert azure_http.request(c, "DELETE", "https://x/thing") == {}
 
 
-def test_throttling_is_retried_and_retry_after_is_honoured(no_waiting):
-    c = client(httpx.Response(429, headers={"retry-after": "7"}), httpx.Response(200, json={"ok": True}))
+def test_a_brief_burst_of_throttling_is_waited_out(no_waiting):
+    """Azure saying 'one second' is worth a second. It clears bursts."""
+    c = client(httpx.Response(429, headers={"retry-after": "1"}), httpx.Response(200, json={"ok": True}))
     assert azure_http.request(c, "POST", "https://x/runs", json={})["ok"]
     assert len(c.seen) == 2
-    assert no_waiting == [7.0]
+    assert no_waiting == [1.0]
+
+
+def test_a_long_wait_is_not_waited_out(no_waiting):
+    """The quota is spent. Queueing behind it wastes the customer's time."""
+    c = client(httpx.Response(429, headers={"retry-after": "7"}, json={"error": {"message": "quota"}}))
+    with pytest.raises(azure_http.Throttled) as e:
+        azure_http.request(c, "POST", "https://x/runs", json={})
+    assert e.value.retry_after == 7.0
+    assert len(c.seen) == 1, "no retry at all"
+    assert no_waiting == []
+
+
+def test_throttling_stops_after_one_quick_retry(no_waiting):
+    """One short wait, then the truth - not three waits and then a timeout."""
+    c = client(*[httpx.Response(429)] * 4)
+    with pytest.raises(azure_http.Throttled):
+        azure_http.request(c, "POST", "https://x/runs", json={})
+    assert len(c.seen) == azure_http.THROTTLE_RETRIES + 1 == 2
+    assert no_waiting == [0.5]
+
+
+def test_throttling_is_its_own_kind_of_error():
+    """Callers tell 'we are busy' from 'it broke'; Throttled is still an AzureError."""
+    c = client(httpx.Response(429, headers={"retry-after": "30"}))
+    with pytest.raises(azure_http.AzureError) as e:
+        azure_http.request(c, "GET", "https://x/run")
+    assert isinstance(e.value, azure_http.Throttled)
+    assert e.value.status == 429
+
+
+def test_advice_for_the_customer_is_not_half_a_second():
+    """Azure OpenAI often omits Retry-After when a quota window is full."""
+    c = client(httpx.Response(429), httpx.Response(429))
+    with pytest.raises(azure_http.Throttled) as e:
+        azure_http.request(c, "GET", "https://x/run")
+    assert e.value.retry_after == 20.0
 
 
 @pytest.mark.parametrize("status", [408, 500, 502, 503, 504])
@@ -61,7 +98,7 @@ def test_backoff_doubles_without_retry_after(no_waiting):
 
 
 def test_a_huge_retry_after_is_capped(no_waiting):
-    c = client(httpx.Response(429, headers={"retry-after": "3600"}), httpx.Response(200, json={}))
+    c = client(httpx.Response(503, headers={"retry-after": "3600"}), httpx.Response(200, json={}))
     azure_http.request(c, "GET", "https://x/run")
     assert no_waiting == [azure_http.MAX_WAIT_SECONDS]
 

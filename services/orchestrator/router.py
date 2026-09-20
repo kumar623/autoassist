@@ -32,9 +32,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 
-from . import telemetry, tools
+from . import azure_http, limits, telemetry, tools
+from .cache import TimedCache
 from .foundry import FoundryAgents
-from .runner import ToolCallRecord, TurnResult, ask, ask_streaming
+from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, throttled_turn
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +120,98 @@ BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule
 FAULT_CODE = re.compile(r"\b[PBCU][0-9]{4}\b", re.IGNORECASE)
 
 
+# --------------------------------------------------------------- answer cache
+#
+# "What does P0420 mean" has one right answer, it costs 5-9k tokens and 7-9
+# seconds to write, and in a demo everybody asks it. The documents behind it
+# change when someone runs the ingest script, which is not during a conversation.
+# So the whole reply is kept for a few minutes and the second person to ask gets
+# it instantly and for nothing.
+#
+# The rules about WHAT may be kept are the important part of this, not the cache
+# itself, and they are deliberately strict. Only a first message (no history),
+# only a plain diagnostics answer, never a safety-flagged one, never one with a
+# booking or an escalation in it, and never a message with anything personal in
+# it. A cached booking reply handed to the next visitor would be exactly the
+# cross-customer leak the red team found in the booking tools (docs/evaluation.md,
+# findings 11 and 12), arrived at from a different direction.
+ANSWERS = TimedCache(limits.setting("ANSWER_CACHE_SECONDS", 600), name="answers")
+MAX_CACHED_MESSAGE_CHARS = 300
+
+# If any of this is in the message, the answer belongs to one person and is not
+# reusable - and the message itself should not sit in memory alongside an answer
+# that quotes it. Matching too eagerly only costs a cache miss, so the patterns
+# are loose on purpose.
+PERSONAL = re.compile(
+    r"[\w.+-]+@[\w-]+\.[\w.]{2,}"                       # an email address
+    r"|\b[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}\b"   # a registration: AP31BD1213
+    r"|\b\d[\d\s-]{6,}\d\b"                             # a phone number
+    r"|\b(AA|TE)-?\s?[A-Z0-9]{5,}\b",                   # a booking reference
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class CachedAnswer:
+    """A reply worth handing to the next person who asks the same thing.
+
+    A record, not the live TurnResults: those are mutable and shared between
+    threads, and _withhold_reassurance edits them in place. What is kept here is
+    only what a reply reports.
+    """
+
+    reply: str
+    agents: list[str]
+    searched: bool
+    trace: list[dict]
+    stored_at: float
+
+
+def cache_key(message: str) -> str | None:
+    """What this message would be remembered under, or None if it must not be.
+
+    Case and spacing vary between people asking the same question; nothing else
+    is normalised. In particular no word is removed, because "is it safe to
+    drive" and "is it not safe to drive" must never meet in the same bucket.
+    """
+    if ANSWERS.seconds <= 0:
+        return None
+    if PERSONAL.search(message):
+        return None
+    text = " ".join(message.split()).lower().rstrip("?!. ")
+    if not text or len(text) > MAX_CACHED_MESSAGE_CHARS:
+        return None
+    return text
+
+
+def worth_caching(message: str, out: RouterResult, history: list[dict] | None) -> bool:
+    """Whether this reply is the same for everyone who asks, and came out clean.
+
+    The strictest rule is the last one: only messages fast_route decides. Triage
+    is a model, and on an ambiguous message - "the car pulls hard to the left
+    when I slow down" - it flags a safety issue on most runs and not on all of
+    them. Caching an answer from a run where it did not would freeze that one
+    roll of the dice and hand it to everyone for the next ten minutes, turning a
+    one-in-N miss into a certainty. fast_route decides in code: a fault code,
+    no booking word, no safety word. The same message always gets the same route,
+    so there is no judgement to freeze.
+    """
+    decision = out.decision
+    if history or out.error or out.withheld or out.cached_from is not None:
+        return False
+    if decision is None or decision.safety or decision.route() != ["diagnostics"]:
+        return False
+    if fast_route(message, history) is None:
+        return False
+    specialists = [t for t in out.turns if t.agent_name == "diagnostics"]
+    if len(specialists) != 1:
+        return False
+    turn = specialists[0]
+    # An answer with no search behind it is finding 1, and caching one would
+    # serve it to everybody for ten minutes rather than once.
+    return bool(turn.ok and turn.answer.strip() and out.searched)
+
+
 def prefetch_documents(message: str) -> tuple[str, str, int] | None:
     """Search the library before the diagnostics agent runs.
 
@@ -199,21 +292,53 @@ class RouterResult:
     duration_ms: int = 0
     error: str | None = None
     withheld: list[str] = field(default_factory=list)  # answers dropped by _withhold_reassurance
+    # Set when this reply came out of the answer cache rather than the agents.
+    cached_from: CachedAnswer | None = None
+    # Set when Azure's quota was spent and no specialist got to answer. A field
+    # rather than a property over `turns`: triage's own turn succeeds and its
+    # answer is the routing JSON, so "did any turn produce text?" said no
+    # throttling had happened on exactly the messages where it had.
+    throttled: bool = False
+    retry_after: int = 0
+
+    @property
+    def cached(self) -> bool:
+        return self.cached_from is not None
 
     @property
     def total_tokens(self) -> int:
+        # A cached reply cost nothing to produce this time. Reporting what it
+        # cost the first time would overstate every figure downstream - /metrics,
+        # the cost per request, and the number quoted in an interview.
+        if self.cached:
+            return 0
         return sum(t.prompt_tokens + t.completion_tokens for t in self.turns)
 
     @property
     def agents_used(self) -> list[str]:
+        if self.cached_from:
+            return list(self.cached_from.agents)
         return [t.agent_name for t in self.turns]
 
     @property
     def searched(self) -> bool:
+        # A cached answer was grounded in a search when it was written, and the
+        # trace below still shows it. Saying otherwise would make the runbook's
+        # ungrounded-answer alert fire on every cache hit.
+        if self.cached_from:
+            return self.cached_from.searched
         return any(t.searched for t in self.turns)
 
     def trace(self) -> list[dict]:
         """A flat record of what happened, for logging and the API response."""
+        if self.cached_from:
+            age = int(time.time() - self.cached_from.stored_at)
+            return [
+                {"agent": "cache", "status": "hit", "tools": [], "ms": self.duration_ms,
+                 "tokens": 0, "error": None,
+                 "note": f"answered from the cache; written {age}s ago by the turns below"},
+                *self.cached_from.trace,
+            ]
         return [
             {
                 "agent": t.agent_name,
@@ -521,7 +646,10 @@ def _run_specialists(
         if len(wave) == 1:
             specialist = wave[0]
             prompt = _context_for(specialist, message, decision, results, history, prefetched)
-            turn = ask(client, ids[specialist], prompt, timeout=timeout, agent_name=specialist)
+            try:
+                turn = ask(client, ids[specialist], prompt, timeout=timeout, agent_name=specialist)
+            except azure_http.Throttled as e:
+                turn = throttled_turn(specialist, e)
             results.append(turn)
             if not turn.ok:
                 log.warning("%s turn failed: %s", specialist, turn.error)
@@ -546,6 +674,8 @@ def _run_specialists(
                 for fut, specialist in futures.items():
                     try:
                         done_turns[specialist] = fut.result()
+                    except azure_http.Throttled as e:
+                        done_turns[specialist] = throttled_turn(specialist, e)
                     except Exception as e:  # noqa: BLE001
                         # One specialist failing must not lose the others' work.
                         log.exception("%s raised", specialist)
@@ -586,6 +716,15 @@ SAFETY_FALLBACK = (
     "Do not drive the vehicle. What you describe may affect its safety, and it needs to "
     "be checked by a technician first. Please call the workshop directly and someone "
     "will help you straight away."
+)
+
+# When Azure's token quota is spent. Said plainly, because it is not a failure
+# and the customer can do something about it: wait a minute, or ring up. The old
+# behaviour here was to retry for the length of the request timeout and then say
+# "Sorry - I could not get an answer", which took ninety seconds to say nothing.
+BUSY_REPLY = (
+    "The assistant is handling a lot of messages just now and could not get to yours. "
+    "Please try again in a minute. If it is urgent, call the workshop and someone will help you."
 )
 
 
@@ -650,8 +789,13 @@ def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
 
     if not answers and decision.safety:
         # Nothing usable came back - or it was withheld - on a safety issue.
-        # The warning must not depend on an agent having answered.
+        # The warning must not depend on an agent having answered. That includes
+        # being throttled: "we are busy, try later" is not an answer to a brake
+        # problem, so the warning comes first here too.
         return SAFETY_FALLBACK
+
+    if not answers and any(t.throttled for t in turns):
+        return BUSY_REPLY
 
     if not answers:
         return (
@@ -659,14 +803,22 @@ def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
             "Please call the workshop directly and someone will help you."
         )
 
-    if len(answers) == 1:
-        return answers[0][1]
-
     # Safety first, whoever wrote it.
-    if decision.safety:
+    if len(answers) > 1 and decision.safety:
         answers.sort(key=lambda a: 0 if a[0] == "escalation" else 1)
 
-    return "\n\n".join(text for _, text in answers)
+    reply = "\n\n".join(text for _, text in answers)
+
+    # Something was written, but not all of it: the quota ran out part-way, or one
+    # of two specialists never got to answer. Saying so is better than handing
+    # over half a reply as though it were the whole one.
+    if any(t.throttled for t in turns):
+        reply += (
+            "\n\n(Part of this reply is missing because the assistant is very busy just now. "
+            "Please ask again in a minute.)"
+        )
+
+    return reply
 
 
 def handle(
@@ -710,6 +862,8 @@ def handle(
             safety=bool(d and d.safety),
             safety_source=d.safety_source if d else "none",
             total_tokens=out.total_tokens,
+            cached=out.cached,
+            throttled=out.throttled or None,  # only present when it happened
             duration_ms=out.duration_ms,
             agent_count=len(out.turns),
             failed_turns=sum(1 for t in out.turns if not t.ok),
@@ -739,6 +893,17 @@ def _handle_inner(
         out.duration_ms = int((time.time() - started) * 1000)
         return
 
+    # --- 0. has someone already asked exactly this? ---
+    # Only a first message: with a conversation behind it the answer depends on
+    # what came before, and two people's conversations are not the same.
+    key = cache_key(message) if not history else None
+    if key:
+        found = ANSWERS.get(key)
+        if found:
+            log.info("answered from the cache: %r", key[:80])
+            _serve_cached(found, out, started, on_delta)
+            return
+
     # --- 1. triage, unless the message speaks for itself ---
     decision = fast_route(message, history)
     if decision is not None:
@@ -748,8 +913,31 @@ def _handle_inner(
 
     if on_status:
         on_status("reading your message")
-    triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout, agent_name="triage")
+    try:
+        triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout, agent_name="triage")
+    except azure_http.Throttled as e:
+        triage_turn = throttled_turn("triage", e)
     out.turns.append(triage_turn)
+
+    if triage_turn.throttled:
+        # All four agents share one model deployment. If triage could not get a
+        # token, neither will the specialists, so there is nothing to gain by
+        # finding that out three more times. The safety keywords still decide the
+        # reply: a brake problem gets the warning even with no model available.
+        # Built here rather than through parse_triage's fallback, which would
+        # also record a triage parse failure - and triage parsed nothing, because
+        # it never ran.
+        keyword_safety = bool(SAFETY_WORDS.search(message))
+        out.decision = TriageDecision(
+            intents=["diagnostics"] + (["escalation"] if keyword_safety else []),
+            safety=keyword_safety,
+            safety_source="keyword" if keyword_safety else "none",
+            reason="Azure was throttling; no agent ran",
+        )
+        out.reply = _compose([triage_turn], out.decision)
+        out.throttled, out.retry_after = True, int(triage_turn.retry_after)
+        out.duration_ms = int((time.time() - started) * 1000)
+        return
 
     if not triage_turn.ok:
         log.warning("triage turn failed: %s", triage_turn.error)
@@ -817,8 +1005,13 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     if _can_stream(on_delta, route, decision):
         specialist = route[0]
         prompt = _context_for(specialist, message, decision, [], history, prefetched)
-        out.turns.append(ask_streaming(client, ids[specialist], prompt, on_delta,
-                                       timeout=timeout, agent_name=specialist, on_status=on_status))
+        try:
+            turn = ask_streaming(client, ids[specialist], prompt, on_delta,
+                                 timeout=timeout, agent_name=specialist, on_status=on_status)
+        except azure_http.Throttled as e:
+            # Raised before the stream opened, so nothing has been shown yet.
+            turn = throttled_turn(specialist, e)
+        out.turns.append(turn)
     else:
         out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history, prefetched))
     specialists = out.turns[before:]
@@ -829,9 +1022,59 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     # --- 3. check, then compose ---
     out.withheld = _withhold_reassurance(specialists, decision)
     out.reply = _compose(specialists, decision)
+    _note_throttling(specialists, out)
     out.duration_ms = int((time.time() - started) * 1000)
+
+    _remember_answer(message, history, out)
 
     log.info(
         "handled in %dms: agents=%s tokens=%d",
         out.duration_ms, out.agents_used, out.total_tokens,
     )
+
+
+def _note_throttling(specialists: list[TurnResult], out: RouterResult) -> None:
+    """Record whether the customer was turned away because the quota was spent.
+
+    Judged on the specialists alone. Triage is an agent too, but its answer is
+    routing JSON the customer never sees, so counting it as "something was
+    answered" reported no throttling on precisely the messages that had been
+    throttled - and /metrics is where the decision to ask Azure for more quota
+    comes from.
+    """
+    throttled = [t for t in specialists if t.throttled]
+    if not throttled:
+        return
+    out.retry_after = max(int(t.retry_after) for t in throttled)
+    out.throttled = not any(t.answer.strip() for t in specialists)
+
+
+def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_delta=None) -> None:
+    """Hand back an answer someone else's question already paid for.
+
+    The decision is rebuilt rather than stored, because worth_caching only ever
+    admits one shape: a plain diagnostics answer with no safety flag. Storing a
+    decision would invite someone to widen that later without noticing.
+    """
+    out.cached_from = found
+    out.reply = found.reply
+    out.decision = TriageDecision(intents=["diagnostics"], reason="answered from the cache")
+    if on_delta:
+        on_delta(found.reply)  # in one piece: there is nothing to wait for
+    out.duration_ms = int((time.time() - started) * 1000)
+
+
+def _remember_answer(message: str, history: list[dict] | None, out: RouterResult) -> None:
+    """Keep this reply for the next person who asks the same thing, if it may be kept."""
+    if not worth_caching(message, out, history):
+        return
+    key = cache_key(message)
+    if not key:
+        return
+    ANSWERS.put(key, CachedAnswer(
+        reply=out.reply,
+        agents=out.agents_used,
+        searched=out.searched,
+        trace=out.trace(),
+        stored_at=time.time(),
+    ))

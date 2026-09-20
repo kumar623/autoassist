@@ -177,6 +177,15 @@ class FoundryAgents:
                     continue
                 if r.status_code >= 400:
                     r.read()
+                    if r.status_code == 429:
+                        # Same rule as azure_http: throttling is its own answer,
+                        # not a failure. Nothing has been written to the customer
+                        # yet - the stream has not started - so they can be told
+                        # plainly that the service is busy.
+                        raise azure_http.Throttled(
+                            429, r.text[:300], "POST", url,
+                            retry_after=azure_http.advised_wait(r.headers.get("retry-after")),
+                        )
                     raise azure_http.AzureError(r.status_code, r.text[:300], "POST", url)
                 event = ""
                 for line in r.iter_lines():

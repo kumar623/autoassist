@@ -49,6 +49,31 @@ class TimedCache:
                 self._prune(time.time())
         return value
 
+    def get(self, key):
+        """The cached value for `key`, or None.
+
+        For values that are only worth keeping sometimes - a whole answer is
+        cached only if it turns out to be the kind of answer that is the same for
+        everyone, which is not known until it has been written. get_or_call
+        cannot express that, because it decides before the work happens.
+
+        A cached None is indistinguishable from a miss. Nothing stores one.
+        """
+        now = time.time()
+        with self._lock:
+            found = self._values.get(key)
+            if found and found[0] > now:
+                self.hits += 1
+                return found[1]
+            self.misses += 1
+            return None
+
+    def put(self, key, value) -> None:
+        with self._lock:
+            self._values[key] = (time.time() + self.seconds, value)
+            if len(self._values) > 256:
+                self._prune(time.time())
+
     def clear(self) -> None:
         """Forget everything. Called when the thing cached has just changed."""
         with self._lock:

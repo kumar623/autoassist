@@ -30,11 +30,11 @@ from typing import Literal
 
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import library, telemetry
+from . import library, limits, telemetry
 from . import router as routing
 from .foundry import FoundryAgents
 
@@ -85,7 +85,16 @@ METRICS = {
     "triage_parse_failures": 0,
     "total_tokens": 0,
     "total_ms": 0,
+    "refused": 0,       # rate limited or too many at once, never reached an agent
+    "throttled": 0,     # Azure had no quota left
+    "cache_hits": 0,    # answered from an identical earlier question
 }
+
+# /chat and /chat/stream are public. LIMITS is what stops one visitor - or one
+# curl loop - from being the whole load and spending the month's quota in an
+# afternoon. Nothing else is limited: the deploy smoke test polls /health every
+# five seconds, and /library is a static read.
+LIMITS = limits.Limits()
 
 
 @asynccontextmanager
@@ -139,6 +148,12 @@ class ChatResponse(BaseModel):
     tokens: int
     ms: int
     trace: list[dict]
+    # An identical question had already been answered, so this one cost nothing.
+    cached: bool = False
+    # Azure had no token quota left. The reply says so; this lets a caller tell
+    # that apart from an ordinary answer without reading the text.
+    throttled: bool = False
+    retry_after: int = 0
 
 
 @app.get("/health")
@@ -172,17 +187,47 @@ def ready() -> dict:
 @app.get("/metrics")
 def metrics() -> dict:
     m = dict(METRICS)
-    m["avg_ms"] = round(m["total_ms"] / m["requests"], 1) if m["requests"] else 0
-    m["avg_tokens"] = round(m["total_tokens"] / m["requests"], 1) if m["requests"] else 0
+    answered = m["requests"] or 1
+    m["avg_ms"] = round(m["total_ms"] / answered, 1) if m["requests"] else 0
+    m["avg_tokens"] = round(m["total_tokens"] / answered, 1) if m["requests"] else 0
+    m.update(LIMITS.snapshot())
     return m
 
 
+def _admit(request: Request) -> None:
+    """Decide whether to handle this message at all. Every caller must release().
+
+    Refusing is not an error: the reply says what happened in words, and
+    Retry-After says when to come back. Counted separately from failures, which
+    are ours.
+    """
+    key = limits.visitor_key(request.headers, request.client.host if request.client else None)
+    try:
+        LIMITS.admit(key)
+    except limits.Refused as e:
+        METRICS["refused"] += 1
+        # A refused message never reaches routing.handle, so it opens no
+        # chat.request span - and without this one a script being turned away
+        # five thousand times an hour looks in App Insights exactly like a quiet
+        # afternoon: tokens flat, latency unchanged, nothing failing, fewer
+        # requests. The visitor is recorded as a short digest, so two refusals
+        # can be tied together without this service writing addresses into Log
+        # Analytics.
+        with telemetry.span("chat.refused") as s:
+            telemetry.set(s, reason=e.reason, retry_after=e.retry_after,
+                          visitor=limits.digest(key), in_flight=LIMITS.in_flight.count)
+        raise HTTPException(
+            e.status, detail=e.customer_message, headers={"Retry-After": str(e.retry_after)}
+        ) from None
+
+
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+def chat(req: ChatRequest, request: Request) -> ChatResponse:
     client = STATE.get("client")
     if client is None:
         raise HTTPException(503, detail="service is not connected to Azure")
 
+    _admit(request)
     METRICS["requests"] += 1
     started = time.time()
 
@@ -198,6 +243,8 @@ def chat(req: ChatRequest) -> ChatResponse:
         METRICS["failures"] += 1
         log.exception("chat failed")
         raise HTTPException(500, detail=f"{type(e).__name__}: {e}") from e
+    finally:
+        LIMITS.release()
 
     return _chat_response(result, started)
 
@@ -213,6 +260,13 @@ def _chat_response(result, started: float) -> ChatResponse:
         METRICS["triage_parse_failures"] += 1
     if result.error:
         METRICS["failures"] += 1
+    if result.cached:
+        METRICS["cache_hits"] += 1
+    if result.throttled:
+        # Not a failure. Nothing broke; there was no quota left. The runbook's
+        # throttling alert reads this, and lumping it in with failures would hide
+        # the one number that says "ask Azure for more quota".
+        METRICS["throttled"] += 1
 
     return ChatResponse(
         reply=result.reply,
@@ -222,11 +276,14 @@ def _chat_response(result, started: float) -> ChatResponse:
         tokens=result.total_tokens,
         ms=result.duration_ms,
         trace=result.trace(),
+        cached=result.cached,
+        throttled=result.throttled,
+        retry_after=result.retry_after,
     )
 
 
 @app.post("/chat/stream")
-def chat_stream(req: ChatRequest):
+def chat_stream(req: ChatRequest, request: Request):
     """The same answer as /chat, sent as it is written.
 
     A specialist takes 5-8s to write; waiting for all of it before showing
@@ -244,6 +301,11 @@ def chat_stream(req: ChatRequest):
     if client is None:
         raise HTTPException(503, detail="service is not connected to Azure")
 
+    # Admitted here so a refusal is an HTTP status the page can read, before any
+    # of the body has been written. The slot is held until the generator below
+    # finishes, which is long after this function has returned - hence admit and
+    # release rather than the `with` used by /chat.
+    _admit(request)
     METRICS["requests"] += 1
     started = time.time()
     fragments: queue.Queue = queue.Queue()
@@ -267,28 +329,36 @@ def chat_stream(req: ChatRequest):
 
     def events():
         streamed = ""
-        while True:
-            item = fragments.get()
-            if item is DONE:
-                return
-            if isinstance(item, str):  # a fragment of the answer
-                streamed += item
-                yield _sse({"type": "delta", "text": item})
-                continue
-            kind, payload = item
-            if kind == "status":
-                yield _sse({"type": "status", "text": payload})
-                continue
-            if kind == "error":
-                METRICS["failures"] += 1
-                yield _sse({"type": "error", "detail": payload})
-                continue
-            body = _chat_response(payload, started)
-            # The customer has already read the streamed text; sending it again
-            # would duplicate it, so `reply` is only included when nothing was
-            # streamed (several agents, or a safety answer held back for checks).
-            yield _sse({"type": "done", **body.model_dump(),
-                        "reply": "" if streamed.strip() else body.reply})
+        try:
+            while True:
+                item = fragments.get()
+                if item is DONE:
+                    return
+                if isinstance(item, str):  # a fragment of the answer
+                    streamed += item
+                    yield _sse({"type": "delta", "text": item})
+                    continue
+                kind, payload = item
+                if kind == "status":
+                    yield _sse({"type": "status", "text": payload})
+                    continue
+                if kind == "error":
+                    METRICS["failures"] += 1
+                    yield _sse({"type": "error", "detail": payload})
+                    continue
+                body = _chat_response(payload, started)
+                # The customer has already read the streamed text; sending it again
+                # would duplicate it, so `reply` is only included when nothing was
+                # streamed (several agents, or a safety answer held back for checks).
+                yield _sse({"type": "done", **body.model_dump(),
+                            "reply": "" if streamed.strip() else body.reply})
+        finally:
+            # However this ends - finished, failed, or the customer closing the
+            # tab part-way - the slot goes back. A leaked slot is permanent: the
+            # replica would answer one fewer message for the rest of its life.
+            # The worker thread may still be running when a customer leaves; it
+            # is not cancellable, but it holds no slot of its own.
+            LIMITS.release()
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

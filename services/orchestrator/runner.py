@@ -35,7 +35,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
-from . import telemetry, tools
+from . import azure_http, telemetry, tools
 from .foundry import FoundryAgents
 
 log = logging.getLogger(__name__)
@@ -87,6 +87,11 @@ class TurnResult:
     completion_tokens: int = 0
     duration_ms: int = 0
     error: str | None = None
+    # Set when the turn ended because Azure's token quota was spent rather than
+    # because anything went wrong. The reply the customer gets is different, so
+    # the difference has to survive as far as _compose.
+    throttled: bool = False
+    retry_after: float = 0.0
 
     @property
     def searched(self) -> bool:
@@ -299,6 +304,27 @@ def ask(
             _CLEANUP.submit(_delete_thread, client, thread_id)
 
 
+THROTTLED_ERROR = "throttled: Azure had no token quota left"
+
+
+def throttled_turn(agent_name: str, e: azure_http.Throttled) -> TurnResult:
+    """A turn that never ran, because Azure's token quota was spent.
+
+    Returned rather than raised so the caller can carry on: on a safety-flagged
+    message the warning still has to reach the customer, and it does not come
+    from a model. See router._compose.
+    """
+    log.warning("%s: Azure is throttling, not retrying (%s)", agent_name or "agent", e.message)
+    out = TurnResult(agent_name=agent_name, status="failed")
+    # Azure's own wording, not repeated here: it names the deployment and the
+    # pricing tier, and the trace this ends up in is returned in the body of a
+    # public, unauthenticated endpoint. The full text is in the log above.
+    out.error = THROTTLED_ERROR
+    out.throttled = True
+    out.retry_after = e.retry_after
+    return out
+
+
 def _delete_thread(client: FoundryAgents, thread_id: str) -> None:
     """Best effort. A thread we failed to delete costs nothing but clutter."""
     try:
@@ -367,8 +393,27 @@ TOOL_STATUS = {
 
 
 def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float, on_status=None) -> None:
-    events = client.stream_thread_and_run(agent_id, question)
     answer: list[str] = []
+    try:
+        _stream_events(client, agent_id, question, on_delta, timeout, out, started, on_status, answer)
+    except azure_http.Throttled as e:
+        # Mid-answer throttling: the run started, so some of the answer may
+        # already be on the customer's screen. Whatever arrived is kept - it is
+        # theirs and it was grounded - and the reply says it was cut short.
+        log.warning("%s: throttled while streaming (%s)", out.agent_name or "agent", e.message)
+        out.throttled, out.retry_after = True, e.retry_after
+        out.status = out.status or "failed"
+        out.error = THROTTLED_ERROR
+
+    out.answer = "".join(answer).strip()
+    out.duration_ms = int((time.time() - started) * 1000)
+    if not out.status:
+        out.status, out.error = "failed", out.error or "the stream ended without finishing the run"
+
+
+def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float,
+                   on_status, answer: list[str]) -> None:
+    events = client.stream_thread_and_run(agent_id, question)
     rounds = 0
 
     while events is not None:
@@ -419,11 +464,6 @@ def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult,
                 elif out.status in ("cancelled", "expired"):
                     out.error = f"run {out.status}"
         events = next_events
-
-    out.answer = "".join(answer).strip()
-    out.duration_ms = int((time.time() - started) * 1000)
-    if not out.status:
-        out.status, out.error = "failed", out.error or "the stream ended without finishing the run"
 
 
 def _run_requested_tools(run: dict, out: TurnResult, agent_name: str) -> list[dict] | None:

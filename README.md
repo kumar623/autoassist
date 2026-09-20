@@ -246,6 +246,17 @@ hand) · model-graded evaluation (the scorer checks compliance, not quality).
   server: real appointments in the workshop's calendar, and Zoho emails the
   customer. The JSON file remains as the default and for offline tests. See
   [docs/decisions/008-zoho-bookings.md](docs/decisions/008-zoho-bookings.md).
+- **The chat endpoints are public** — no sign-in, no key. A rate limit (10 a
+  minute, 60 an hour per visitor), a concurrency cap and an answer cache keep
+  one visitor from being the whole load, and Azure throttling now produces an
+  honest "we are busy" in about a second rather than a 90-second timeout. The
+  counters are per replica, so the honest claim is "one visitor cannot flood
+  us", not "the limit is exact". Authentication is still the right answer. See
+  [docs/decisions/009-protecting-a-public-chat.md](docs/decisions/009-protecting-a-public-chat.md).
+- **The model quota is the ceiling, not the code.** 100,000 tokens a minute at
+  5,000–9,000 a message is roughly 12–20 messages a minute; 10,000 messages
+  would take about eleven hours and cost about £30. More traffic than that needs
+  more quota, not a faster service.
 - **No reranker** on the Free search tier.
 - **The relevance floor cannot judge topic.** It measures agreement between
   search methods, not whether a document is about the right component. A clutch

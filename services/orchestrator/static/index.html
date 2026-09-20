@@ -276,7 +276,11 @@ async function askServer(text) {
     if (!r.ok || !r.body) {
       const err = await r.json().catch(() => ({detail: r.statusText}));
       bubble.classList.remove('empty');
-      bubble.textContent = 'Something went wrong: ' + (err.detail || r.status);
+      // 429 and 503 are the rate limit and the concurrency cap. Those replies
+      // are already written for the customer, so they are shown as they are -
+      // "Something went wrong" would be both unfriendly and untrue.
+      const refused = (r.status === 429 || r.status === 503) && err.detail;
+      bubble.textContent = refused ? err.detail : 'Something went wrong: ' + (err.detail || r.status);
       return;
     }
 
