@@ -972,8 +972,14 @@ def test_a_very_long_message_is_trimmed_before_searching(monkeypatch):
 @pytest.mark.parametrize("answer,withheld", [
     ("P0420 is medium severity; it is safe to drive with care (fault code list, P0420).", False),
     ("It is safe to drive with caution until the service.", False),
+    # The same documented line, in the wording the agent actually writes.
+    ("The severity is medium, and it is safe to drive the vehicle with care (fault code list, P0420).", False),
+    ("The severity is medium, and it is safe to drive the vehicle but with care (fault code list, P0420).", False),
+    ("It is safe to drive your car with care until it is looked at.", False),
     ("A spongy pedal is normal and it is safe to keep driving (TSB-032).", True),
     ("It is safe to drive.", True),
+    # An object is not the exemption: only "with care" is.
+    ("It is safe to drive the vehicle.", True),
 ])
 def test_the_fault_code_lists_own_wording_is_not_treated_as_reassurance(answer, withheld):
     """'safe to drive with care' is what data/dtc_codes.csv says about medium
@@ -999,3 +1005,60 @@ def test_brevity_is_asked_per_request_not_in_the_agents_prompt():
     # converter (20 Sep). Its own prompt decides when a warning belongs.
     assert "safety" not in context.split("KEEP IT SHORT")[1].lower()
     assert "80 words" not in _context_for("booking", "book me", _decision(["booking"]), [])
+
+
+# ---------------------------------------------------------------- the warning belongs where it belongs
+#
+# Live app, 20 Sep: "What does P0420 mean and is it safe to drive?" - the page's
+# own first example - came back opening "Do not drive the vehicle, it needs
+# immediate professional attention", then said two lines later that the severity
+# is medium and it is safe to drive with care. Six runs out of six, on both the
+# routed path and the agent on its own.
+#
+# The cost was not only the contradiction. The page sends the last few turns
+# back with the next message, triage read "do not drive" in that history and
+# flagged the following message as a safety issue, which forces escalation onto
+# the route - so a fault code question raised a ticket for a human service
+# advisor, and the diagnostics answer was then withheld as reassurance because
+# it said the car was safe to drive with care.
+#
+# Fixed in the agent's prompt, which is the only place that decides this: the
+# per-request note must not mention safety (naming it there primed the warning -
+# see the test above), and asking for brevity there cost grounding. The two
+# halves of the rule are checked here so that neither can be deleted alone.
+
+
+def test_the_diagnostics_prompt_keeps_both_halves_of_the_safety_rule():
+    import json
+    import pathlib
+
+    prompt = json.loads(
+        pathlib.Path("agents/definitions/diagnostics.json").read_text()
+    )["instructions"]
+
+    # Half one: a real safety issue still opens with the warning.
+    assert "SAFETY ISSUES" in prompt
+    assert "do not drive the vehicle, it needs immediate professional attention" in prompt
+    for system in ("brakes", "steering", "airbags", "seat belts", "smell of petrol"):
+        assert system in prompt, system
+
+    # Half two: being asked about driving safely is the question, not a safety
+    # issue, and the fault code list's own severity line is the answer.
+    assert "FAULT CODES ARE NOT AUTOMATICALLY SAFETY ISSUES" in prompt
+    assert "safe to drive with care" in prompt
+    assert "'Safe to drive' line" in prompt
+
+    # ...and it says what it does not cover. An earlier draft left that out, and
+    # the model applied "the document's severity is the answer" to a smell of
+    # petrol: the warning disappeared on 5 runs out of 5, which is finding 9
+    # straight back again. Three sentences carry the repair and each is checked:
+    # precedence, the worked example, and the search rule the extra text was
+    # diluting.
+    second = prompt.split("FAULT CODES ARE NOT AUTOMATICALLY SAFETY ISSUES")[1]
+    assert "never outranks the section above" in second
+    assert "smell of petrol is a fuel safety issue" in second
+    assert "you still search before you answer" in second
+
+    # And the reason the first half cannot simply be softened away: an uncertain
+    # symptom is still treated as a safety issue.
+    assert "treat it as one" in prompt

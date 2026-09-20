@@ -292,8 +292,11 @@ def format_for_agent(result: RetrievalResult) -> str:
         "\n"
         "THIS TOOL ONLY TELLS YOU WHAT IS IN THE LIBRARY. It does not tell you what "
         "your answer should contain. Every other instruction you have still applies "
-        "in full - in particular, if the question involves a safety system, your "
-        "safety warning comes first whether or not anything here was usable. "
-        "'Not covered' is never the whole answer to a safety question."
+        "in full - in particular, if the question involves a safety system - brakes, "
+        "steering, airbags, seat belts, fuel including any smell of petrol, smoke or "
+        "fire - your safety warning comes first whether or not anything here was "
+        "usable, and whether or not a document here treats the symptom as a known "
+        "condition. 'Not covered' is never the whole answer to a safety question, "
+        "and neither is 'here is what the bulletin says about it'."
     )
     return "\n".join(parts)

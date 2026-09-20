@@ -569,6 +569,13 @@ def _context_for(
             # the vehicle" for a worn catalytic converter (20 Sep). Its own
             # prompt already says when a warning belongs, and when it does the
             # warning is not counted against the length.
+            #
+            # The agent went on warning on P0420 with nothing said here at all -
+            # finding 13. The fix was to narrow the rule in its own prompt, which
+            # is the only place that can tell a brake symptom from an emissions
+            # code. Saying "do not warn" here would only have swapped one blanket
+            # instruction for another, on the turn where a warning is the thing
+            # that matters.
             "KEEP IT SHORT: two short paragraphs, about 80 words in total - what it means, the likely "
             "cause, what to do next. They are reading this on a phone, standing next to the car. Do not "
             "restate the question and do not add a closing summary. Use only the documents you kept, "
@@ -748,7 +755,14 @@ def _run_specialists(
 REASSURANCE = re.compile(
     # "safe to drive with care" is what the fault code list itself says about
     # medium-severity codes, so it is a documented answer, not reassurance.
-    r"(?<!not )(?<!n't )(?<!never )\bsafe to (keep |continue )?driv(e|ing)\b(?! with (care|caution))"
+    # The exemption has to cover the wording the agent actually writes, not one
+    # canonical form of it: "safe to drive the vehicle with care" and "safe to
+    # drive the vehicle but with care" are the same documented line, and an
+    # exemption that misses them withholds a correct answer over a turn of
+    # phrase (finding 13). The object and the "but" live inside the lookahead
+    # so that a bare "safe to drive" cannot backtrack its way out of it.
+    r"(?<!not )(?<!n't )(?<!never )\bsafe to (keep |continue )?driv(e|ing)\b"
+    r"(?!( (the |your )?(vehicle|car|it))?,? (but )?with (care|caution))"
     r"|\b(is|are|feels?) (completely |perfectly |quite )?normal\b"
     r"|\b(nothing|no need) to worry\b",
     re.IGNORECASE,

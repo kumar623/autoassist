@@ -589,3 +589,152 @@ Fixed in code, in `booking.py`:
 
 Both findings are now attacks in `evals/red_team.py`, plus offline tests in
 `tests/test_router.py` and `tests/test_booking.py`.
+
+---
+
+# Week 4 — the warning that cried wolf
+
+### 13. A blanket safety warning on a question that was not about safety
+
+The page's own first example button, on the live app, 20 Sep:
+
+> **What does P0420 mean and is it safe to drive?**
+>
+> Do not drive the vehicle, it needs immediate professional attention.
+>
+> The P0420 fault code means the catalytic converter is not cleaning the exhaust
+> gases as well as it should. … The severity is medium, so it is safe to drive
+> with care, but you should have it checked soon (fault code list, P0420).
+
+The first line and the third contradict each other. P0420 is medium severity and
+`data/dtc_codes.csv` says `safe_to_drive: yes-with-care`, which is why
+`router.REASSURANCE` exempts that exact phrase — the system already knew this
+answer was correct, and warned over the top of it anyway. Six runs out of six,
+on the routed path and on the agent called directly.
+
+**It did not stop at the wording.** The page sends the last few turns back with
+the next message. Measured on a two-turn conversation, twice out of twice:
+
+| | |
+|---|---|
+| Turn 1 | "Do not drive the vehicle…" lands in the reply, and so in the history |
+| Turn 2 | triage reads that history and flags the new message as a safety issue — `safety_source=triage`, though `_triage_input` tells it to judge the flag on the new message alone |
+| | a safety flag forces `escalation` onto the route, so escalation runs and calls `raise_ticket`: a fault code question raises a ticket for a human |
+| | `_withhold_reassurance` then drops the diagnostics answer, because it says the car is safe to drive with care — so the customer is left with the ticket and no explanation |
+| | `_can_stream` refuses to stream a safety-flagged turn, so it is slower as well |
+
+One wrong sentence, and the rest of the system did exactly what it was built to
+do with it. Nothing downstream was at fault: every one of those steps is correct
+behaviour given a "do not drive" in the conversation.
+
+**Where it came from.** The agent's own `SAFETY ISSUES` rule, which ended: *"If
+you are unsure whether something is a safety issue, treat it as one — an
+unnecessary warning costs the customer nothing."* That last clause is false
+here, and the cascade above is the bill. A question that contains the words
+*safe to drive* is not an uncertain symptom; it is the question, and the fault
+code list answers it.
+
+The fix had to go in the agent definition. The two other places were already
+closed by earlier findings: naming safety in the per-request note primes the
+agent to warn (the comment in `_context_for` says so, and that is how this
+symptom first appeared), and asking for brevity there rather than in the prompt
+was itself the fix for losing the search call.
+
+## Three drafts that each broke something else
+
+Every draft was measured before it was believed — the two behaviours that have
+to hold at the same time are *"P0420 must not warn"* and *"a smell of petrol
+must warn"*, and only one draft in four held both.
+
+| Draft | P0420 quiet | petrol warns | petrol searched |
+|---|---|---|---|
+| original prompt (control) | 2/3 | 3/3 | 3/3 |
+| 1. rewrote `SAFETY ISSUES`, added an open-ended "when the warning does not belong" | 6/6 | **3/7**, none of them grounded | **4/7** |
+| 2. section scoped to fault codes, `SAFETY ISSUES` left alone | 3/3 | 3/3 | **0/3** |
+| 3. the same, shortened, ending "you still search before you answer" | 3/3 | **2/3** | 3/3 |
+| 4. + precedence stated and the petrol case named | 5/5 | 4/5 | 5/5 |
+| 5. **shipped** — 4, plus the safety systems named in the tool's own closing block | **11/11** | **11/11** | **11/11** |
+
+Draft 5 was then run end to end as well: three more P0420 replies through the
+router and three more straight to the agent, with no warning in any of them, the two-turn conversation no longer
+flagged or ticketed, and "my brakes have stopped working" and "there is a smell
+of petrol" still warned, escalated and raised a safety ticket, 4 for 4.
+
+Draft 1 is finding 9 coming straight back: told that the document's severity
+line is the answer, the model applied that to a *symptom* as well, found the
+hard-starting bulletin for a petrol smell, reported it as a medium-severity
+known condition, and left the warning out. One of those answers said in as many
+words that it was "not indicated as an immediate safety hazard". A bulletin's
+severity is a filing label — `ingest.py` stamps every bulletin chunk `medium` —
+and the model read it as a judgement about whether the car is safe today.
+
+Draft 2 is finding 1 coming back: 1,300 characters more prompt, and the agent
+stopped calling the search on the safety question. Prompt text is not free
+either. Saying "and you still search before you answer" in the same breath put
+it back.
+
+Draft 5 stops relying on the system prompt alone. The last thing the agent reads
+before writing is the search tool's own closing block, and it already said *"if
+the question involves a safety system, your safety warning comes first"*. It now
+names the systems — brakes, steering, airbags, seat belts, fuel including any
+smell of petrol, smoke or fire — and adds that a document describing the symptom
+as a known condition does not settle it. Same lesson as finding 7: the tool
+output is a second prompt, and it is the one nearest the answer.
+
+## What ships
+
+- `agents/definitions/diagnostics.json`: one new section, `FAULT CODES ARE NOT
+  AUTOMATICALLY SAFETY ISSUES`. The `SAFETY ISSUES` section above it is
+  unchanged, so finding 9's wording is untouched.
+- `retrieval.format_for_agent`: the closing block names the safety systems.
+- `router.REASSURANCE`: the "with care" exemption now covers the wording the
+  agent actually writes — *safe to drive **the vehicle** with care*, *safe to
+  drive the vehicle **but** with care*. Written one way only, the exemption
+  withheld a correct, cited answer over a turn of phrase.
+- Three golden-set cases: `dtc-known-01` (tightened — it passed all through
+  this, while opening with the warning), `dtc-medium-01` (P0171, the same rule
+  away from the one code that was hand-tested), `dtc-safety-01` (C0110, the ABS
+  pump motor circuit — a fault code that *is* a safety system and must still
+  warn).
+
+Full set after: **19/20**, ~93k tokens, 40s. Before: 16/18 on the suite as it
+then was. The one failure is `convo-diag-01`, which was already failing before
+this change — see below.
+
+## Why the guard is not in code this time
+
+`_withhold_reassurance` is code because the expensive direction there is
+delivering a wrong reassurance; withholding an explanation is cheap. Here it is
+the other way round. A guard that stripped "do not drive" from an answer when
+triage had not flagged the message would, on the run where triage is wrong,
+delete the one sentence that mattered. Two models disagreeing about whether
+something is dangerous should not resolve to *silence*. So this one is fixed
+where the judgement is made, and measured rather than assumed.
+
+## Still open
+
+**`convo-diag-01` fails, and not for this reason.** "is it safe to drive with
+it?" after a P0420 answer: `prefetch_documents` searches the library for the
+literal follow-up text, finds nothing about P0420, and the agent is told not to
+search again — so the follow-up is answered with no P0420 document at all, and
+says the library does not cover the code. It failed the same way before this
+change. The fix belongs with the pre-search, not the prompt: a follow-up needs
+the fault code from the conversation in its query.
+
+**The "costs the customer nothing" sentence is still in the prompt.** It is
+false as written, and it is also the tilt that makes an uncertain symptom get a
+warning — finding 9 leans on it. Removing it is a change of its own, and it
+needs its own ten runs.
+
+**Triage still carries a safety flag forward on some runs.** With the spurious
+warning gone there is much less in the history to carry, but "is it safe to
+drive with it?" was flagged on 2 runs in 3 with a clean history above it. The
+ticket-already-raised check limits the damage to one ticket per conversation.
+
+## Note on method
+
+Every number above is a pass count over N runs of the same question, not one
+run. Week 3 closed with *"running the set N times and reporting a pass rate per
+case is the correct next step"*; drafts 3 and 4 are why. Draft 4 measured 4/4,
+looked finished, and then lost the warning on the next full-suite run. A change
+to a safety behaviour that has been seen to work once has not been measured.

@@ -97,6 +97,24 @@ def test_nothing_relevant_means_nothing_returned(azure):
     assert retrieval.format_for_agent(r).startswith("NOTHING USABLE")
 
 
+def test_the_closing_block_names_the_safety_systems_and_the_bulletin_trap(azure):
+    """The last thing the agent reads before writing is this block, and that
+    position is worth using.
+
+    'If the question involves a safety system' on its own did not reach the
+    case it is for: asked about a smell of petrol, the agent found the
+    hard-starting bulletin, wrote what it said, and left the warning out on 1
+    run in 5 (finding 13). Naming the systems, and saying that a bulletin
+    describing the symptom does not settle it, closed that.
+    """
+    azure["results"] = [hit(1, 0.03)]
+    out = retrieval.format_for_agent(retrieval.search("smell of petrol"))
+    tail = out.split("THIS TOOL ONLY TELLS YOU")[1]
+    for system in ("brakes", "steering", "airbags", "seat belts", "smell of petrol"):
+        assert system in tail, system
+    assert "known condition" in tail
+
+
 def test_fetch_all_reads_the_whole_index_without_a_vector(azure):
     azure["results"] = [hit(1, 1.0)]
     assert len(retrieval.fetch_all(["doc_type", "content"])) == 1

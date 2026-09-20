@@ -20,7 +20,7 @@ triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9
 ```
 
 > Week 3 of 3. Working: retrieval, four agents, parallel routing, HTTP API,
-> chat page, container, CI, App Insights tracing, automated evals (16/16).
+> chat page, container, CI, App Insights tracing, automated evals (19/20).
 > Not yet: deployment pipeline, Terraform. See [Status](#status).
 
 ---
@@ -166,7 +166,7 @@ python3 agents/deploy_agents.py
 ```bash
 make serve                  # http://localhost:8000
 make test                   # 112 tests, no Azure needed
-make evals                  # 16 golden-set cases against the real agents
+make evals                  # 20 golden-set cases against the real agents
 
 python3 agents/ask.py "what does P0420 mean"
 python3 agents/ask.py "my brakes feel spongy"
@@ -225,7 +225,8 @@ independent specialists run in parallel · function tools executed in-process ·
 run loop with timeouts and per-call logging · OpenTelemetry tracing into
 Application Insights · FastAPI with liveness and readiness · chat page showing
 the trace · Dockerfile · GitHub Actions CI · 112 offline tests · automated
-eval suite scoring 16 cases on trace facts, 16/16 passing.
+eval suite scoring 20 cases on trace facts, 19/20 passing (the one failure is
+known and written up as finding 13 in docs/evaluation.md).
 
 **Not done yet:** deployment pipeline (CI runs tests, builds the image and runs
 the smoke evals; it does not deploy) · Terraform (resources were created by
