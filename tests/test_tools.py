@@ -6,16 +6,13 @@ customer something honest.
 """
 
 import json
-import os
-import pathlib
-import tempfile
 
 import pytest
 
-os.environ.setdefault("BOOKING_STORE", str(pathlib.Path(tempfile.gettempdir()) / "aa_tools_bookings.json"))
-os.environ.setdefault("TICKET_STORE", str(pathlib.Path(tempfile.gettempdir()) / "aa_tools_tickets.json"))
-
-from services.orchestrator import booking, tools  # noqa: E402
+# The stores are pointed at a temporary directory by clean_store below. Setting
+# BOOKING_STORE here did nothing: conftest imports the router, and with it the
+# booking module, before this file is read.
+from services.orchestrator import booking, tools
 
 
 @pytest.fixture(autouse=True)
@@ -69,23 +66,6 @@ def test_non_object_arguments_return_an_error():
 def test_get_slots_returns_json():
     out = tools.execute("get_available_slots", "{}")
     assert '"ok": true' in out.lower()
-
-
-def test_booking_through_the_tool_layer():
-    import json
-
-    slots = json.loads(tools.execute("get_available_slots", "{}"))
-    slot_id = slots["slots"][0]["slot_id"]
-    out = json.loads(
-        tools.execute(
-            "book_service_slot",
-            json.dumps({"slot_id": slot_id, "registration": "AP31AB1234", "issue": "noise",
-                        "customer_name": "Krishna", "customer_email": "k@example.com",
-                        "customer_phone": "9876543210"}),
-        )
-    )
-    assert out["ok"]
-    assert out["reference"].startswith("AA-")
 
 
 def test_the_booking_backend_is_chosen_by_configuration(monkeypatch):

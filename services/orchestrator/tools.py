@@ -137,6 +137,19 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
     }
 
 
+# The same two parameters on every tool that reads or changes an existing
+# booking. The registration is all that stands between a guessed reference and
+# someone else's booking, so the model is told where it must come from - once,
+# rather than three copies that could drift apart.
+BOOKING_REFERENCE = {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."}
+MATCHING_REGISTRATION = {
+    "type": "string",
+    "description": "The registration the booking was made with. Ask the customer for it - "
+    "never copy it from a booking you looked up. A booking is only shown or changed "
+    "when the reference and this registration match.",
+}
+
+
 SCHEMAS: dict[str, dict] = {
     "search_service_docs": _tool(
         "search_service_docs",
@@ -222,12 +235,7 @@ SCHEMAS: dict[str, dict] = {
                 "type": "string",
                 "description": "The slot_id from get_available_slots, exactly as given.",
             },
-            "registration": {
-                "type": "string",
-                "description": "The registration the booking was made with. Ask the customer for it - "
-                "never copy it from a booking you looked up. A booking is only shown or changed "
-                "when the reference and this registration match.",
-            },
+            "registration": MATCHING_REGISTRATION,
         },
         ["reference", "new_slot_id", "registration"],
     ),
@@ -236,13 +244,8 @@ SCHEMAS: dict[str, dict] = {
         "Cancel an existing booking using its reference. Only when the customer asks "
         "to cancel. To change the time, use move_service_booking instead.",
         {
-            "reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."},
-            "registration": {
-                "type": "string",
-                "description": "The registration the booking was made with. Ask the customer for it - "
-                "never copy it from a booking you looked up. A booking is only shown or changed "
-                "when the reference and this registration match.",
-            },
+            "reference": BOOKING_REFERENCE,
+            "registration": MATCHING_REGISTRATION,
         },
         ["reference", "registration"],
     ),
@@ -250,13 +253,8 @@ SCHEMAS: dict[str, dict] = {
         "look_up_booking",
         "Look up a booking by its reference to confirm the details.",
         {
-            "reference": {"type": "string", "description": "Booking reference, e.g. AA-4K2P9X."},
-            "registration": {
-                "type": "string",
-                "description": "The registration the booking was made with. Ask the customer for it - "
-                "never copy it from a booking you looked up. A booking is only shown or changed "
-                "when the reference and this registration match.",
-            },
+            "reference": BOOKING_REFERENCE,
+            "registration": MATCHING_REGISTRATION,
         },
         ["reference", "registration"],
     ),

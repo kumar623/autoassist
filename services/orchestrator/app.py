@@ -4,10 +4,12 @@ Endpoints:
     GET  /            the chat page
     POST /chat        {"message": "...", "history": [...]} -> {"reply": "...", "trace": [...]}
     POST /chat/stream same, but the answer arrives as it is written (SSE)
+    GET  /agents      the four agents, their tools, and where each tool call goes
     GET  /library     every document the assistant can cite, from the index
     GET  /health      liveness  - is the process up?
     GET  /ready       readiness - can it actually serve? (checks Azure)
-    GET  /metrics     counters, in lieu of App Insights until week 3
+    GET  /metrics     this replica's counters since it started; the full picture,
+                      per request, is in Application Insights (telemetry.py)
 
 Health vs ready matters in Kubernetes and Container Apps. Liveness failing gets
 the container restarted. Readiness failing takes it out of the load balancer but
@@ -173,8 +175,7 @@ def ready() -> dict:
     if STATE.get("client") is None:
         raise HTTPException(503, detail=f"no Azure client: {STATE.get('startup_error', 'unknown')}")
 
-    missing = [n for n in ("triage", "diagnostics", "booking", "escalation")
-               if n not in STATE["agent_ids"]]
+    missing = [n for n in routing.AGENTS if n not in STATE["agent_ids"]]
     if missing:
         raise HTTPException(503, detail=f"agents not deployed: {', '.join(missing)}")
 
@@ -188,9 +189,9 @@ def ready() -> dict:
 @app.get("/metrics")
 def metrics() -> dict:
     m = dict(METRICS)
-    answered = m["requests"] or 1
-    m["avg_ms"] = round(m["total_ms"] / answered, 1) if m["requests"] else 0
-    m["avg_tokens"] = round(m["total_tokens"] / answered, 1) if m["requests"] else 0
+    n = m["requests"]
+    m["avg_ms"] = round(m["total_ms"] / n, 1) if n else 0
+    m["avg_tokens"] = round(m["total_tokens"] / n, 1) if n else 0
     m.update(LIMITS.snapshot())
     # Which classifier is live, and whether Jev is actually answering or quietly
     # handing everything back to the agent.
@@ -310,8 +311,8 @@ def chat_stream(req: ChatRequest, request: Request):
 
     # Admitted here so a refusal is an HTTP status the page can read, before any
     # of the body has been written. The slot is held until the generator below
-    # finishes, which is long after this function has returned - hence admit and
-    # release rather than the `with` used by /chat.
+    # finishes, which is long after this function has returned, so it is
+    # released there rather than here.
     _admit(request)
     METRICS["requests"] += 1
     started = time.time()

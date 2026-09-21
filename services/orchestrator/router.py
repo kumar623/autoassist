@@ -2,8 +2,11 @@
 
 The shape:
 
-    message -> triage (returns JSON, no prose)
-            -> one or more specialists, in order
+    message -> answered at once? (small talk, the answer cache)
+            -> who should answer: the message itself (a bare fault code),
+               else Jev's probabilities (TRIAGE_BACKEND=jev),
+               else the triage agent's JSON - with the keyword backstops on top
+            -> one or more specialists, concurrently where they can be
             -> one reply
 
 Routing is done in CODE, not by an agent calling other agents. That is a
@@ -39,7 +42,12 @@ from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, emit, thrott
 
 log = logging.getLogger(__name__)
 
-VALID_INTENTS = {"diagnostics", "booking", "escalation", "other"}
+# The specialists, in the order they run and are shown. With triage in front,
+# the four agents /ready and handle() insist are deployed. roster.ORDER and
+# jev_triage.SPECIALISTS say the same, and a test holds them to it.
+SPECIALISTS = ("diagnostics", "booking", "escalation")
+AGENTS = ("triage", *SPECIALISTS)
+VALID_INTENTS = {*SPECIALISTS, "other"}
 
 # The page sends the last few turns with each message, because every request is
 # otherwise stateless: when booking asked for a registration, the reply arrived
@@ -176,10 +184,11 @@ MAX_CACHED_MESSAGE_CHARS = 300
 # If any of this is in the message, the answer belongs to one person and is not
 # reusable - and the message itself should not sit in memory alongside an answer
 # that quotes it. Matching too eagerly only costs a cache miss, so the patterns
-# are loose on purpose.
+# are loose on purpose. The registration pattern is jev_triage's, so what counts
+# as a registration here cannot drift from what Jev's path extracts as one.
 PERSONAL = re.compile(
     r"[\w.+-]+@[\w-]+\.[\w.]{2,}"                       # an email address
-    r"|\b[A-Z]{2}\s?\d{1,2}\s?[A-Z]{1,3}\s?\d{1,4}\b"   # a registration: AP31BD1213
+    rf"|{jev_triage.REGISTRATION.pattern}"             # a registration: AP31BD1213
     r"|\b\d[\d\s-]{6,}\d\b"                             # a phone number
     r"|\b(AA|TE)-?\s?[A-Z0-9]{5,}\b",                   # a booking reference
     re.IGNORECASE,
@@ -299,9 +308,10 @@ class TriageDecision:
     registration: str | None = None
     date: str | None = None
     reason: str = ""
-    raw: str = ""
     parse_failed: bool = False
-    safety_source: str = "none"  # "triage", "keyword", "both", "none"
+    # Who flagged safety: the classifier ("triage" for the agent, "jev"), the
+    # keyword check, "both", or "none".
+    safety_source: str = "none"
     booking_added_by_keyword: bool = False
     triage_skipped: bool = False
     # Which classifier decided: "agent" (gpt-4.1-mini writing JSON) or "jev"
@@ -312,8 +322,7 @@ class TriageDecision:
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
-        order = ["diagnostics", "booking", "escalation"]
-        chosen = [i for i in order if i in self.intents]
+        chosen = [i for i in SPECIALISTS if i in self.intents]
 
         if self.safety and "escalation" not in chosen:
             chosen.append("escalation")
@@ -397,19 +406,6 @@ class RouterResult:
 
 def parse_triage(text: str, message: str) -> TriageDecision:
     """Turn the triage agent's JSON into a decision, and never trust it blindly."""
-    decision = _parse_triage(text, message)
-
-    if BOOKING_WORDS.search(message) and "booking" not in decision.intents:
-        log.warning("triage missed a booking request the keyword check caught: %r", message[:120])
-        decision.intents = [i for i in decision.intents if i != "other"] + ["booking"]
-        decision.booking_added_by_keyword = True
-
-    return decision
-
-
-def _parse_triage(text: str, message: str) -> TriageDecision:
-    keyword_safety = bool(SAFETY_WORDS.search(message))
-
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
@@ -419,77 +415,84 @@ def _parse_triage(text: str, message: str) -> TriageDecision:
         if not isinstance(data, dict):
             raise ValueError("not an object")
     except (json.JSONDecodeError, ValueError) as e:
-        # Triage failed. Fall back to something safe rather than guessing:
-        # try diagnostics, and escalate if the message looks dangerous.
         log.warning("triage returned unparseable output (%s): %r", e, text[:200])
-        return TriageDecision(
-            intents=["diagnostics"] + (["escalation"] if keyword_safety else []),
-            safety=keyword_safety,
-            reason="triage output could not be parsed; fell back to diagnostics",
-            raw=text,
-            parse_failed=True,
-            safety_source="keyword" if keyword_safety else "none",
-        )
+        return _keyword_fallback(message, "triage output could not be parsed; fell back to diagnostics",
+                                 parse_failed=True)
 
     intents = [i for i in (data.get("intents") or []) if i in VALID_INTENTS]
-    if not intents:
-        intents = ["other"]
-
-    triage_safety = bool(data.get("safety"))
-    safety = triage_safety or keyword_safety
-
-    if triage_safety and keyword_safety:
-        source = "both"
-    elif triage_safety:
-        source = "triage"
-    elif keyword_safety:
-        source = "keyword"
-    else:
-        source = "none"
-
-    if keyword_safety and not triage_safety:
-        log.warning("triage missed a safety signal the keyword check caught: %r", message[:120])
-
-    return TriageDecision(
-        intents=intents,
-        safety=safety,
+    decision = TriageDecision(
+        intents=intents or ["other"],
         registration=data.get("registration") or None,
         date=data.get("date") or None,
         reason=str(data.get("reason") or ""),
-        raw=text,
-        safety_source=source,
     )
+    return _with_backstops(decision, message, "triage", classifier_safety=bool(data.get("safety")))
 
 
 def _decision_from_jev(classified, message: str) -> TriageDecision:
     """Jev's four probabilities as a TriageDecision, through the same backstops.
 
-    SAFETY_WORDS and BOOKING_WORDS still run. They are cheap, they do not care
-    what language they are reading - Jev scored a routine Hinglish complaint at
-    0.75 on the safety question - and everything downstream already trusts that
-    either source firing is enough.
+    They matter as much here: the keyword check does not care what language it
+    is reading, and Jev scored a routine Hinglish complaint at 0.75 on the
+    safety question.
     """
-    keyword_safety = bool(SAFETY_WORDS.search(message))
     decision = TriageDecision(
         intents=list(classified.intents),
-        safety=classified.safety or keyword_safety,
         registration=classified.registration,
         reason=classified.reason(),
         backend="jev",
         probabilities=classified.probabilities,
-        safety_source=("both" if classified.safety and keyword_safety
-                       else "jev" if classified.safety
-                       else "keyword" if keyword_safety else "none"),
     )
-    if keyword_safety and not classified.safety:
-        log.warning("the keyword check caught a safety signal Jev scored at %.2f: %r",
-                    classified.probabilities.get("safety", 0.0), message[:120])
-    # The same booking backstop the agent path gets, for the same reason.
+    return _with_backstops(decision, message, "jev", classifier_safety=classified.safety)
+
+
+def _with_backstops(decision: TriageDecision, message: str, who: str, classifier_safety: bool) -> TriageDecision:
+    """SAFETY_WORDS and BOOKING_WORDS on top of whichever classifier decided.
+
+    One function for both classifiers, so "the keyword net runs whatever made
+    the decision" is true by construction rather than by keeping two copies
+    alike. Either source flagging safety is enough, and everything downstream
+    already trusts that. `who` names the classifier in safety_source and logs.
+    """
+    keyword_safety = bool(SAFETY_WORDS.search(message))
+    decision.safety = classifier_safety or keyword_safety
+    decision.safety_source = ("both" if classifier_safety and keyword_safety
+                              else who if classifier_safety
+                              else "keyword" if keyword_safety else "none")
+    if keyword_safety and not classifier_safety:
+        scored = decision.probabilities.get("safety")
+        log.warning("%s missed a safety signal the keyword check caught%s: %r", who,
+                    f" (scored {scored:.2f})" if scored is not None else "", message[:120])
+    return _with_booking_backstop(decision, message, who)
+
+
+def _with_booking_backstop(decision: TriageDecision, message: str, who: str) -> TriageDecision:
+    """Add booking when the customer plainly asked for an appointment and the
+    classifier did not say so. `other` goes: it meant "none of the above"."""
     if BOOKING_WORDS.search(message) and "booking" not in decision.intents:
-        log.warning("Jev missed a booking request the keyword check caught: %r", message[:120])
+        log.warning("%s missed a booking request the keyword check caught: %r", who, message[:120])
         decision.intents = [i for i in decision.intents if i != "other"] + ["booking"]
         decision.booking_added_by_keyword = True
     return decision
+
+
+def _keyword_fallback(message: str, reason: str, parse_failed: bool = False) -> TriageDecision:
+    """The decision when no classifier answered: its output was unparseable, its
+    turn failed, or Azure had no quota for it.
+
+    Something safe rather than a guess: try diagnostics, escalate if the message
+    looks dangerous, book if it asks to. The keywords need no model, so a brake
+    problem still gets the warning when nothing else is working.
+    """
+    keyword_safety = bool(SAFETY_WORDS.search(message))
+    decision = TriageDecision(
+        intents=["diagnostics"] + (["escalation"] if keyword_safety else []),
+        safety=keyword_safety,
+        safety_source="keyword" if keyword_safety else "none",
+        reason=reason,
+        parse_failed=parse_failed,
+    )
+    return _with_booking_backstop(decision, message, "the fallback")
 
 
 def _agent_ids(client: FoundryAgents) -> dict[str, str]:
@@ -697,8 +700,9 @@ def _plan(route: list[str]) -> list[list[str]]:
     ['diagnostics', 'booking', 'escalation'] -> [['diagnostics', 'booking'], ['escalation']]
 
     Deliberately simple: a specialist waits only if something it depends on is
-    in this route. No topological sort, because the graph is four nodes and one
-    edge, and a reader should be able to check this function by eye.
+    in this route. No topological sort, because the graph is three nodes and two
+    edges (escalation waits for the other two), and a reader should be able to
+    check this function by eye.
     """
     waves: list[list[str]] = []
     remaining = list(route)
@@ -743,11 +747,8 @@ def _run_specialists(
         if len(wave) == 1:
             specialist = wave[0]
             prompt = _context_for(specialist, message, decision, results, history, prefetched)
-            try:
-                turn = ask(client, ids[specialist], prompt, timeout=timeout,
-                           agent_name=specialist, on_event=on_event)
-            except azure_http.Throttled as e:
-                turn = throttled_turn(specialist, e)
+            turn = _ask_or_throttled(ask, specialist, client, ids[specialist], prompt, timeout=timeout,
+                                     on_event=on_event)
             results.append(turn)
             if not turn.ok:
                 log.warning("%s turn failed: %s", specialist, turn.error)
@@ -764,7 +765,7 @@ def _run_specialists(
             with ThreadPoolExecutor(max_workers=len(wave), thread_name_prefix="specialist") as pool:
                 futures = {
                     pool.submit(
-                        ask, client, ids[s], prompts[s], timeout=timeout, agent_name=s,
+                        _ask_or_throttled, ask, s, client, ids[s], prompts[s], timeout=timeout,
                         on_event=on_event,
                     ): s
                     for s in wave
@@ -773,8 +774,6 @@ def _run_specialists(
                 for fut, specialist in futures.items():
                     try:
                         done_turns[specialist] = fut.result()
-                    except azure_http.Throttled as e:
-                        done_turns[specialist] = throttled_turn(specialist, e)
                     except Exception as e:  # noqa: BLE001
                         # One specialist failing must not lose the others' work.
                         log.exception("%s raised", specialist)
@@ -997,7 +996,7 @@ def _handle_inner(
 ) -> None:
     ids = agent_ids or _agent_ids(client)
 
-    missing = [n for n in ("triage", "diagnostics", "booking", "escalation") if n not in ids]
+    missing = [n for n in AGENTS if n not in ids]
     if missing:
         out.error = f"agents not deployed: {', '.join(missing)}. Run agents/deploy_agents.py"
         out.reply = "The service is not fully set up. Please call the workshop directly."
@@ -1015,90 +1014,81 @@ def _handle_inner(
             _serve_cached(found, out, started, on_delta, on_event)
             return
 
-    # --- 1. triage, unless the message speaks for itself ---
+    # --- 1. who should answer: the message itself, then Jev, then the agent ---
     decision = fast_route(message, history)
-    if decision is not None:
-        log.info("triage skipped: %s", decision.reason)
-        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                          on_status, on_event)
-        return
+    measured: dict = {}
 
-    if on_status:
-        on_status("reading your message")
-
-    # --- 1a. Jev, if it is switched on and can answer ---
-    # Falls through to the agent for anything it cannot do: no key, the service
-    # unreachable, a question unanswered. A classifier being down is a reason to
-    # use the model that was doing this before, not to fail the customer.
-    if jev_triage.configured():
-        # The same window of history the agent path reads (_recent). The API
-        # accepts 20 turns of 8,000 characters; none of that needs to go to a
-        # third party to decide who answers a message.
-        classified = jev_triage.classify(message, (history or [])[-MAX_HISTORY_TURNS:])
+    if decision is None:
+        if on_status:
+            on_status("reading your message")
+        classified = _classify_with_jev(message, history)
         if classified is not None:
             decision = _decision_from_jev(classified, message)
-            out.decision = decision
-            log.info("routing (jev): intents=%s safety=%s -> %s | %s",
-                     decision.intents, decision.safety, decision.route(), decision.reason)
-            with telemetry.span("routing.decision") as rs:
-                telemetry.set(rs, backend="jev", intents=decision.intents, route=decision.route(),
-                              safety=decision.safety, safety_source=decision.safety_source,
-                              duration_ms=classified.duration_ms, tokens=classified.tokens,
-                              has_registration=bool(decision.registration),
-                              **{f"p_{k}": v for k, v in classified.probabilities.items()})
+            measured = {"duration_ms": classified.duration_ms, "tokens": classified.tokens,
+                        **{f"p_{k}": v for k, v in classified.probabilities.items()}}
             emit(on_event, kind="agent", name="triage", state="done", ms=classified.duration_ms,
                  tokens=classified.tokens, ok=True, backend="jev",
                  probabilities=classified.probabilities)
-            _route_and_answer(client, ids, message, decision, timeout, history, out, started,
-                              on_delta, on_status, on_event)
+
+    if decision is None:
+        triage_turn = _ask_or_throttled(ask, "triage", client, ids["triage"], _triage_input(message, history),
+                                        timeout=timeout, on_event=on_event)
+        out.turns.append(triage_turn)
+
+        if triage_turn.throttled:
+            # All four agents share one model deployment. If triage could not get
+            # a token, neither will the specialists, so there is nothing to gain
+            # by finding that out three more times. The safety keywords still
+            # decide the reply: a brake problem gets the warning with no model.
+            out.decision = _keyword_fallback(message, "Azure was throttling; no agent ran")
+            out.reply = _compose([triage_turn], out.decision)
+            out.throttled, out.retry_after = True, int(triage_turn.retry_after)
+            out.duration_ms = int((time.time() - started) * 1000)
             return
 
-    try:
-        triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout,
-                          agent_name="triage", on_event=on_event)
-    except azure_http.Throttled as e:
-        triage_turn = throttled_turn("triage", e)
-    out.turns.append(triage_turn)
+        if triage_turn.ok:
+            decision = parse_triage(triage_turn.answer, message)
+        else:
+            # Not a parse failure - triage parsed nothing, because its turn
+            # failed - so not counted as one in /metrics.
+            log.warning("triage turn failed: %s", triage_turn.error)
+            decision = _keyword_fallback(message, f"triage turn failed ({triage_turn.error}); fell back")
 
-    if triage_turn.throttled:
-        # All four agents share one model deployment. If triage could not get a
-        # token, neither will the specialists, so there is nothing to gain by
-        # finding that out three more times. The safety keywords still decide the
-        # reply: a brake problem gets the warning even with no model available.
-        # Built here rather than through parse_triage's fallback, which would
-        # also record a triage parse failure - and triage parsed nothing, because
-        # it never ran.
-        keyword_safety = bool(SAFETY_WORDS.search(message))
-        out.decision = TriageDecision(
-            intents=["diagnostics"] + (["escalation"] if keyword_safety else []),
-            safety=keyword_safety,
-            safety_source="keyword" if keyword_safety else "none",
-            reason="Azure was throttling; no agent ran",
-        )
-        out.reply = _compose([triage_turn], out.decision)
-        out.throttled, out.retry_after = True, int(triage_turn.retry_after)
-        out.duration_ms = int((time.time() - started) * 1000)
-        return
+    _record_decision(decision, **measured)
+    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
+                      on_status, on_event)
 
-    if not triage_turn.ok:
-        log.warning("triage turn failed: %s", triage_turn.error)
-        decision = parse_triage("", message)
-        decision.reason = f"triage turn failed ({triage_turn.error}); fell back"
-    else:
-        decision = parse_triage(triage_turn.answer, message)
 
-    out.decision = decision
-    log.info(
-        "routing: intents=%s safety=%s (%s) -> %s | %s",
-        decision.intents, decision.safety, decision.safety_source, decision.route(), decision.reason,
-    )
+def _classify_with_jev(message: str, history: list[dict] | None):
+    """Jev's classification, or None: switched off, or it could not answer.
 
-    # A span rather than attributes on the request span, so routing decisions
-    # can be queried on their own - "how often does the keyword check catch
-    # something triage missed?" is a question worth being able to answer.
+    None falls through to the agent - no key, the service unreachable, a
+    question unanswered. A classifier being down is a reason to use the model
+    that was doing this before, not to fail the customer.
+    """
+    if not jev_triage.configured():
+        return None
+    # The same window of history the agent path reads (_recent). The API
+    # accepts 20 turns of 8,000 characters; none of that needs to go to a third
+    # party to decide who answers a message.
+    return jev_triage.classify(message, (history or [])[-MAX_HISTORY_TURNS:])
+
+
+def _record_decision(decision: TriageDecision, **measured) -> None:
+    """One log line and one routing.decision span, whichever path decided.
+
+    A span rather than attributes on the request span, so routing decisions can
+    be queried on their own - "how often does the keyword check catch something
+    the classifier missed?" is a question worth being able to answer, and it has
+    the same answer shape whether the agent, Jev or the fast route decided.
+    """
+    backend = "none" if decision.triage_skipped else decision.backend
+    log.info("routing (%s): intents=%s safety=%s (%s) -> %s | %s", backend, decision.intents,
+             decision.safety, decision.safety_source, decision.route(), decision.reason)
     with telemetry.span("routing.decision") as rs:
         telemetry.set(
             rs,
+            backend=backend,
             intents=decision.intents,
             route=decision.route(),
             safety=decision.safety,
@@ -1109,10 +1099,20 @@ def _handle_inner(
             reason=decision.reason[:200],
             has_registration=bool(decision.registration),
             has_date=bool(decision.date),
+            **measured,
         )
 
-    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                      on_status, on_event)
+
+def _ask_or_throttled(fn, agent_name: str, *args, **kwargs) -> TurnResult:
+    """fn(...) for one agent, or a throttled TurnResult if Azure had no quota.
+
+    Throttled is the one exception every caller answers the same way: nothing is
+    broken, this agent did not get to answer, and the reply will say we are busy.
+    """
+    try:
+        return fn(*args, agent_name=agent_name, **kwargs)
+    except azure_http.Throttled as e:
+        return throttled_turn(agent_name, e)
 
 
 # What each specialist is about to do, in the customer's words.
@@ -1166,12 +1166,9 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     if _can_stream(on_delta, route, decision):
         specialist = route[0]
         prompt = _context_for(specialist, message, decision, [], history, prefetched)
-        try:
-            turn = ask_streaming(client, ids[specialist], prompt, on_delta, timeout=timeout,
-                                 agent_name=specialist, on_status=on_status, on_event=on_event)
-        except azure_http.Throttled as e:
-            # Raised before the stream opened, so nothing has been shown yet.
-            turn = throttled_turn(specialist, e)
+        # Throttled is raised before the stream opens, so nothing has been shown.
+        turn = _ask_or_throttled(ask_streaming, specialist, client, ids[specialist], prompt, on_delta,
+                                 timeout=timeout, on_status=on_status, on_event=on_event)
         out.turns.append(turn)
     else:
         out.turns.extend(_run_specialists(client, ids, route, message, decision, timeout, history,

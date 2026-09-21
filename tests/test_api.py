@@ -111,9 +111,11 @@ def test_refusals_are_counted_apart_from_failures(api):
 
 
 def test_health_and_ready_are_never_rate_limited(api):
-    """The deploy smoke test polls /health every five seconds for four minutes."""
+    """The deploy smoke test polls /health every five seconds for four minutes,
+    and Container Apps' probes call /ready on their own schedule."""
     for _ in range(30):
         assert api.get("/health").status_code == 200
+        assert api.get("/ready").status_code != 429
 
 
 def test_the_library_is_not_rate_limited(api, monkeypatch):
