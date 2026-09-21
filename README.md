@@ -72,6 +72,40 @@ a regex checks the raw text independently. Either firing is enough. When the
 regex catches something triage missed, it logs a warning — a signal the triage
 prompt needs work, captured automatically.
 
+### Jev or the LLM, side by side
+
+Above the message box on the chat page is **Triage: Jev | LLM** and **Compare
+both**.
+
+- **Left alone**, the page sends `auto` and the server's `TRIAGE_BACKEND`
+  decides, exactly as before; the lit segment, marked *default*, is that one.
+- **Pick the other one** and it classifies your messages only. The choice is
+  remembered in your browser. Jev needs a TypeSafe key on the server: without
+  one, picking Jev gets the LLM, and the panel, the step list and the reply's
+  tags all say so rather than showing the LLM's route under Jev's name.
+- **Compare both** has the other classifier read the same message at the same
+  time. A card in the panel puts the two side by side: each one's own route and
+  safety call (Jev's four probabilities, the LLM's JSON), what the keyword net
+  matched and what it added, the final route, latency, tokens, and cost at the
+  prices the routing eval uses (finding 16). Rows where they disagree are
+  highlighted, before the keyword net and after it.
+
+Try **Brake fluid interval**. Jev reads it as a maintenance question and scores
+it low on safety; the keyword net sees "brake" and escalates it anyway. The card
+shows both halves of that — which is the argument for keeping the net.
+
+The comparison is display only. The route, the reply, any ticket and the answer
+cache follow the classifier that was chosen; a compare request neither reads
+nor fills the cache, and its tokens are counted apart (`compare_tokens` in
+`/metrics`), not in the answer's. If the other classifier fails or is still
+running when the answer is ready, the card says so and the answer is unaffected.
+Small talk and a bare fault code are answered without any classifier, so the
+toggle does not apply to them and the panel says that instead.
+
+The same is available without the page: `POST /chat` with `"triage": "jev"`
+(or `"agent"`, or `"auto"`) and `"compare": true`; the response carries
+`triage` (what was asked for, what was used and why) and `comparison`.
+
 ### The agents
 
 | Agent | Job | Tools |
