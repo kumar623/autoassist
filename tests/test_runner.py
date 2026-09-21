@@ -46,20 +46,11 @@ class FakeFoundry:
         self.deleted = []
         self.messages = []
 
-    def create_thread(self):
-        return {"id": "thread_1"}
-
-    def create_message(self, thread_id, content, role="user"):
-        self.messages.append(content)
-
     def _next(self):
         """The next state; the last one repeats, like a run that stays put."""
         return self.states.pop(0) if len(self.states) > 1 else self.states[0]
 
-    def create_run(self, thread_id, agent_id):
-        return self._next()
-
-    def create_thread_and_run(self, agent_id, content, role="user"):
+    def create_thread_and_run(self, agent_id, content):
         """One call: thread, message and run. What ask() uses."""
         self.messages.append(content)
         return {**self._next(), "thread_id": "thread_1"}
@@ -73,7 +64,7 @@ class FakeFoundry:
     def cancel_run(self, thread_id, run_id):
         self.cancelled = True
 
-    def list_messages(self, thread_id, limit=20):
+    def list_messages(self, thread_id):
         return [
             {"role": "assistant", "content": [{"type": "text", "text": {"value": self.answer, "annotations": []}}]},
             {"role": "user", "content": [{"type": "text", "text": {"value": "q", "annotations": []}}]},
@@ -144,9 +135,10 @@ def test_a_run_that_never_finishes_is_cancelled_at_the_timeout():
     assert c.cancelled
 
 
-def test_an_endless_tool_loop_is_stopped_and_cancelled():
+def test_an_endless_tool_loop_is_stopped_and_cancelled(monkeypatch):
+    monkeypatch.setattr(runner, "MAX_TOOL_ROUNDS", 3)
     c = FakeFoundry([wants_tools(("get_available_slots", "{}"))])
-    t = runner.run_turn(c, "asst_1", "thread_1", max_tool_rounds=3)
+    t = runner.ask(c, "asst_1", "q")
     assert "3 rounds" in t.error
     assert c.cancelled
     assert len(c.submitted) == 3
@@ -177,7 +169,7 @@ def test_unparseable_tool_arguments_are_recorded_not_fatal():
 
 def test_the_thread_is_deleted_even_when_the_run_blows_up():
     class Broken(FakeFoundry):
-        def create_thread_and_run(self, agent_id, content, role="user"):
+        def create_thread_and_run(self, agent_id, content):
             raise RuntimeError("Azure is down")
 
     c = Broken([])
@@ -262,3 +254,20 @@ def test_a_stream_that_stops_early_is_not_reported_as_success():
     t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
     assert not t.ok
     assert "did not finish" in t.error or "without finishing" in t.error
+
+
+def test_an_endless_tool_loop_while_streaming_stops_at_the_same_limit(monkeypatch):
+    monkeypatch.setattr(runner, "MAX_TOOL_ROUNDS", 3)
+    again = ("thread.run.requires_action", wants_tools(("get_available_slots", "{}")))
+    c = FakeStreamingFoundry([created(), again], after_tools=[again])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert t.error == "stopped after 3 rounds of tool calls (possible loop)"
+    assert len(c.submitted) == 3
+
+
+def test_an_action_type_we_do_not_handle_stops_the_stream_cleanly():
+    c = FakeStreamingFoundry([created(), ("thread.run.requires_action",
+                                          run("requires_action", required_action={"type": "submit_tool_approval"}))])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert not t.ok and "do not handle" in t.error
+    assert c.submitted == [], "nothing is sent back for an action we did not run"

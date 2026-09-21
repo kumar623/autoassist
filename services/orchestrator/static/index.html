@@ -182,11 +182,6 @@
   .tool.failed .tool-box { stroke: var(--safety); }
   .tool.failed .tool-name { fill: var(--safety); }
 
-  .pct { fill: var(--ink); font-size: 15px; font-weight: 700; }
-  .bar-track { fill: var(--line); }
-  .bar-fill { fill: var(--accent); transition: width .4s ease; }
-  .bar-fill.safety { fill: var(--safety); }
-
   #route {
     border: 1px dashed var(--line); border-radius: 8px; padding: 7px 10px;
     color: var(--muted); font-size: 12px; min-height: 34px; margin: 0;
@@ -376,10 +371,10 @@ const treeEl = document.getElementById('tree');
 const linksEl = document.getElementById('links');
 const boxesEl = document.getElementById('boxes');
 
-const parts = {};       // 'triage' | 'booking' | 'booking.get_available_slots' -> {g, ms, box}
+const parts = {};       // 'triage' | 'booking' -> {g, ms}; 'booking.get_available_slots' -> {g}
 const links = {};       // child key -> <path>
 const lines = {};       // step-list rows, keyed on what the step IS
-let expected = 5, finished = 0, tick = null, sawSafety = false;
+let tick = null, sawSafety = false;
 
 // el() is declared with the library code further down and hoisted to here.
 
@@ -411,20 +406,19 @@ function drawBox(key, x, y, w, name, sub, icon) {
   const ms = svg('text', {class: 'box-ms', x: x + w - 10, y: y + 32});
   g.append(ms);
   boxesEl.append(g);
-  parts[key] = {g, ms, x, y, w};
-  return parts[key];
+  parts[key] = {g, ms};
 }
 
-function toolBox(key, agent, x, y, name, where) {
+// A tool box has no timing of its own: the step list has the timings.
+function toolBox(key, x, y, name, where) {
   const g = svg('g', {class: 'tool'});
   g.dataset.key = key;
   g.append(svg('rect', {class: 'tool-box', x: x, y: y, width: W.tool, height: TOOL_H, rx: 6}));
   g.append(svg('text', {class: 'tool-name', x: x + 8, y: y + 14.5}, name));
   const mcp = /MCP/.test(where);
   g.append(svg('text', {class: 'tool-where' + (mcp ? ' mcp' : ''), x: x + W.tool + 10, y: y + 14.5}, where));
-  const ms = svg('text', {class: 'box-ms', x: x, y: y});   // unused in the tree; the step list has the timings
   boxesEl.append(g);
-  parts[key] = {g, ms, x, y, w: W.tool};
+  parts[key] = {g};
 }
 
 function link(childKey, x1, y1, x2, y2, extra, mid) {
@@ -454,12 +448,10 @@ function drawTree(agents) {
   const middle = TOP + (total - 2 * TOP) / 2;
 
   drawBox('message', COL.msg, middle - BOX_H / 2, W.msg, 'message', 'what you typed', ICONS.message);
-  const triage = drawBox('triage', COL.triage, middle - BOX_H / 2, W.triage, 'triage',
-                     'picks the route', ICONS.triage);
+  drawBox('triage', COL.triage, middle - BOX_H / 2, W.triage, 'triage', 'picks the route', ICONS.triage);
   link('triage', COL.msg + W.msg, middle, COL.triage, middle);
 
-  const reply = drawBox('reply', COL.reply, middle - BOX_H / 2, W.reply, 'reply',
-                    'joined in code', ICONS.reply);
+  drawBox('reply', COL.reply, middle - BOX_H / 2, W.reply, 'reply', 'joined in code', ICONS.reply);
 
   for (const name of SPECIALISTS) {
     const band = bands[name];
@@ -472,16 +464,10 @@ function drawTree(agents) {
     band.tools.forEach((tool, i) => {
       const ty = band.y + BOX_H + 6 + i * (TOOL_H + TOOL_GAP);
       const key = name + '.' + tool.name;
-      toolBox(key, name, COL.agent + 26, ty, tool.name, tool.backend);
+      toolBox(key, COL.agent + 26, ty, tool.name, tool.backend);
       link(key, COL.agent + 13, band.y + BOX_H, COL.agent + 26, ty + TOOL_H / 2, ' tool-link');
     });
   }
-  return {triage, reply};
-}
-
-function setProgress(done, total) {
-  const pct = total ? Math.min(100, Math.round(100 * done / total)) : 0;
-  turnMsEl.dataset.pct = pct;
 }
 
 function step(who, key, what, state, ms) {
@@ -519,7 +505,7 @@ function light(key) {
 function resetPanel() {
   for (const [key, p] of Object.entries(parts)) {
     p.g.setAttribute('class', key.includes('.') ? 'tool' : 'step');
-    p.ms.textContent = '';
+    if (p.ms) p.ms.textContent = '';
   }
   for (const group of Object.values(links)) {
     for (const path of group) path.setAttribute('class', path.getAttribute('class').includes('tool-link')
@@ -530,7 +516,7 @@ function resetPanel() {
   stepsEl.firstChild.append(el('span', 'none', 'reading your message…'));
   routeEl.className = '';
   routeEl.textContent = 'reading your message…';
-  expected = 5; finished = 0; sawSafety = false;
+  sawSafety = false;
   mark('message', 'done');
 
   const started = Date.now();
@@ -551,13 +537,11 @@ function onActivity(ev) {
   if (ev.kind === 'route') {
     const running = ev.agents || [];
     sawSafety = !!ev.safety;
-    expected = (ev.triage_skipped || !running.length ? 0 : 1) + running.length + 1;
     if (ev.triage_skipped || !running.length) mark('triage', 'skipped'); else light('triage');
     for (const name of SPECIALISTS) {
       if (!running.includes(name)) mark(name, 'skipped');
       else { light(name); light(name + '>reply'); }
     }
-    setProgress(finished, expected);
 
     const said = [];
     if (ev.cached) said.push('Answered from the cache — no agent ran, no tokens spent.');
@@ -569,7 +553,6 @@ function onActivity(ev) {
     else if (ev.backend) said.push(ev.backend === 'jev'
       ? 'Classified by Jev: four probabilities, thresholds in code.'
       : 'Classified by the triage agent: gpt-4.1-mini writing JSON.');
-    else if (ev.reason && running.length) said.push(ev.reason);
     routeEl.textContent = said.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
     step('router', 'route', running.length ? running.join(' + ') : 'answered without an agent', 'done');
@@ -594,8 +577,6 @@ function onActivity(ev) {
       mark(ev.name, bad ? 'failed' : 'done');
       const p = parts[ev.name];
       if (p && ev.ms) p.ms.textContent = dur(ev.ms);
-      finished = Math.min(expected - 1, finished + 1);
-      setProgress(finished, expected);
       step(ev.name, 'turn', ev.tokens ? 'thinking · ' + ev.tokens + ' tokens' : 'thinking',
            bad ? 'failed' : 'done', ev.ms);
     }
@@ -610,8 +591,6 @@ function onActivity(ev) {
       step(ev.agent, ev.name, ev.name, 'running');
     } else {
       mark(key, ev.failed ? 'failed' : 'done');
-      const p = parts[key];
-      if (p) p.ms.textContent = dur(ev.ms || 0);
       step(ev.agent, ev.name, ev.name, ev.failed ? 'failed' : 'done', ev.ms);
     }
   }

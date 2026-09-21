@@ -58,9 +58,14 @@ TERMINAL = {
 # gives most of that back. Below ~0.15s the polling itself starts to matter.
 POLL_SECONDS = float(os.getenv("POLL_SECONDS", "0.25"))
 
+# A run that asks for tools round after round without ever answering is stuck,
+# not thorough. Both paths, polled and streamed, stop it here rather than let it
+# spend the whole timeout.
+MAX_TOOL_ROUNDS = 8
+
 # Thread cleanup runs in the background. Deleting a thread is housekeeping - the
 # answer is already in hand - so blocking the customer's response on it buys
-# nothing. One worker is enough; deletes are ~200ms and never urgent.
+# nothing. Two workers are plenty; deletes are ~200ms and never urgent.
 _CLEANUP = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thread-cleanup")
 
 
@@ -133,54 +138,35 @@ def _error_text(err) -> str:
 
 def run_turn(
     client: FoundryAgents,
-    agent_id: str,
-    thread_id: str,
+    run: dict,
     timeout: float = 90.0,
-    max_tool_rounds: int = 8,
     agent_name: str = "",
-    run: dict | None = None,
     on_event=None,
 ) -> TurnResult:
-    """Run one turn on a thread that already has the user message.
+    """Poll a run that has already started until it ends, running its tools.
 
-    `run` is a run already started elsewhere - see ask(), which starts it in the
-    same call that creates the thread.
+    `run` comes from ask(), which starts it in the same call that creates the
+    thread, so it arrives carrying its thread_id.
     """
     started = time.time()
+    thread_id = run.get("thread_id", "")
     out = TurnResult(thread_id=thread_id, agent_name=agent_name)
 
     with telemetry.span("agent.turn", agent=agent_name, thread_id=thread_id) as turn_span:
-        _run_turn_inner(client, agent_id, thread_id, timeout, max_tool_rounds, agent_name, out,
-                        started, run, on_event)
-        telemetry.set(
-            turn_span,
-            run_id=out.run_id,
-            status=out.status,
-            searched=out.searched,
-            tool_count=len(out.tool_calls),
-            tools=[c.name for c in out.tool_calls],
-            prompt_tokens=out.prompt_tokens,
-            completion_tokens=out.completion_tokens,
-            duration_ms=out.duration_ms,
-            error=out.error,
-        )
+        _run_turn_inner(client, run, timeout, out, started, on_event)
+        _record_turn(turn_span, out)
     return out
 
 
 def _run_turn_inner(
     client: FoundryAgents,
-    agent_id: str,
-    thread_id: str,
+    run: dict,
     timeout: float,
-    max_tool_rounds: int,
-    agent_name: str,
     out: TurnResult,
     started: float,
-    run: dict | None = None,
     on_event=None,
 ) -> None:
-    run = run or client.create_run(thread_id, agent_id)
-    run_id = run["id"]
+    thread_id, run_id = out.thread_id, run["id"]
     out.run_id = run_id
 
     rounds = 0
@@ -191,10 +177,7 @@ def _run_turn_inner(
         if elapsed > timeout:
             out.status = _status_of(run)
             out.error = f"timed out after {timeout:.0f}s in state '{out.status}'"
-            try:
-                client.cancel_run(thread_id, run_id)
-            except Exception:  # noqa: BLE001 - cancelling is best effort
-                pass
+            _cancel(client, thread_id, run_id)
             break
 
         status = _status_of(run)
@@ -203,95 +186,150 @@ def _run_turn_inner(
             last_logged = status
 
         if status in TERMINAL:
-            out.status = status
-            if status == "failed":
-                out.error = _error_text(run.get("last_error"))
-            elif status == "incomplete":
-                # The run stopped early. Azure says why in incomplete_details -
-                # usually max tokens or a content filter. Worth surfacing: the
-                # answer may be truncated mid-sentence.
-                why = run.get("incomplete_details")
-                out.error = f"run ended early: {why or 'no reason given'}"
-            elif status in ("cancelled", "cancelling", "expired"):
-                out.error = f"run {status}"
+            _record_ending(out, run)
             break
 
         if status == "requires_action":
             rounds += 1
-            if rounds > max_tool_rounds:
-                out.status = status
-                out.error = f"stopped after {max_tool_rounds} rounds of tool calls (possible loop)"
-                try:
-                    client.cancel_run(thread_id, run_id)
-                except Exception:  # noqa: BLE001
-                    pass
+            if _too_many_rounds(out, rounds):
+                _cancel(client, thread_id, run_id)
                 break
 
-            action = run.get("required_action") or {}
-            if action.get("type") != "submit_tool_outputs":
+            outputs = _run_requested_tools(run, out, on_event)
+            if outputs is None:
+                action_type = (run.get("required_action") or {}).get("type")
                 out.status = status
-                out.error = f"run needs an action we do not handle: {action.get('type') or 'none given'}"
+                out.error = f"run needs an action we do not handle: {action_type or 'none given'}"
                 break
-
-            outputs: list[dict] = []
-            for call in (action.get("submit_tool_outputs") or {}).get("tool_calls") or []:
-                if call.get("type") != "function":
-                    outputs.append({"tool_call_id": call.get("id"), "output": "ERROR: unsupported tool type"})
-                    continue
-
-                name = call["function"]["name"]
-                raw_args = call["function"].get("arguments") or ""
-
-                emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
-                with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
-                    t0 = time.time()
-                    result = tools.execute(name, raw_args)
-                    ms = int((time.time() - t0) * 1000)
-                    emit(on_event, kind="tool", agent=agent_name, name=name, state="done",
-                         ms=ms, failed=result.startswith("ERROR:"))
-                    telemetry.set(
-                        ts,
-                        duration_ms=ms,
-                        failed=result.startswith("ERROR:"),
-                        args=raw_args[:500] if raw_args else "",
-                        # Retrieval reports its own filtering in the first line
-                        # of its output; keep it so a bad search is visible in
-                        # the trace without opening the whole result.
-                        result_head=result[:200],
-                    )
-
-                try:
-                    parsed = json.loads(raw_args) if raw_args else {}
-                except json.JSONDecodeError:
-                    parsed = {"_raw": raw_args}
-
-                out.tool_calls.append(
-                    ToolCallRecord(
-                        name=name,
-                        arguments=parsed if isinstance(parsed, dict) else {"_raw": raw_args},
-                        output_preview=result[:300],
-                        duration_ms=ms,
-                        failed=result.startswith("ERROR:"),
-                    )
-                )
-                log.info("  tool %s(%s) -> %dms%s", name, parsed, ms,
-                         " FAILED" if result.startswith("ERROR:") else "")
-
-                outputs.append({"tool_call_id": call["id"], "output": result})
 
             client.submit_tool_outputs(thread_id, run_id, outputs)
 
         time.sleep(POLL_SECONDS)
         run = client.get_run(thread_id, run_id)
 
-    usage = run.get("usage") or {}
-    out.prompt_tokens = usage.get("prompt_tokens") or 0
-    out.completion_tokens = usage.get("completion_tokens") or 0
+    _record_usage(out, run)
 
     if out.status == "completed":
         out.answer = _latest_assistant_text(client, thread_id)
 
     out.duration_ms = int((time.time() - started) * 1000)
+
+
+# ------------------------------------------------- shared by polling and streaming
+
+
+def _run_requested_tools(run: dict, out: TurnResult, on_event=None) -> list[dict] | None:
+    """Execute the tools a run asked for, recording each one, and return the
+    outputs to submit - or None when the run wants an action we do not handle.
+
+    Both paths come through here, so a tool call leaves the same record, span
+    and panel events whether the answer was polled or streamed.
+    """
+    action = run.get("required_action") or {}
+    if action.get("type") != "submit_tool_outputs":
+        return None
+
+    agent_name = out.agent_name
+    outputs: list[dict] = []
+    for call in (action.get("submit_tool_outputs") or {}).get("tool_calls") or []:
+        if call.get("type") != "function":
+            outputs.append({"tool_call_id": call.get("id"), "output": "ERROR: unsupported tool type"})
+            continue
+
+        name = call["function"]["name"]
+        raw_args = call["function"].get("arguments") or ""
+
+        emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
+        with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
+            t0 = time.time()
+            result = tools.execute(name, raw_args)
+            ms = int((time.time() - t0) * 1000)
+            failed = result.startswith("ERROR:")
+            emit(on_event, kind="tool", agent=agent_name, name=name, state="done", ms=ms, failed=failed)
+            telemetry.set(
+                ts,
+                duration_ms=ms,
+                failed=failed,
+                args=raw_args[:500] if raw_args else "",
+                # Retrieval reports its own filtering in the first line
+                # of its output; keep it so a bad search is visible in
+                # the trace without opening the whole result.
+                result_head=result[:200],
+            )
+
+        try:
+            parsed = json.loads(raw_args) if raw_args else {}
+        except json.JSONDecodeError:
+            parsed = {"_raw": raw_args}
+
+        out.tool_calls.append(
+            ToolCallRecord(
+                name=name,
+                arguments=parsed if isinstance(parsed, dict) else {"_raw": raw_args},
+                output_preview=result[:300],
+                duration_ms=ms,
+                failed=failed,
+            )
+        )
+        log.info("  tool %s(%s) -> %dms%s", name, parsed, ms, " FAILED" if failed else "")
+
+        outputs.append({"tool_call_id": call["id"], "output": result})
+    return outputs
+
+
+def _too_many_rounds(out: TurnResult, rounds: int) -> bool:
+    """Whether this round of tool calls is one too many; if so, the turn says why."""
+    if rounds <= MAX_TOOL_ROUNDS:
+        return False
+    out.status = "requires_action"
+    out.error = f"stopped after {MAX_TOOL_ROUNDS} rounds of tool calls (possible loop)"
+    return True
+
+
+def _record_ending(out: TurnResult, run: dict) -> None:
+    """How a run that has stopped ended, and why when it was not a success."""
+    out.status = _status_of(run)
+    if out.status == "failed":
+        out.error = _error_text(run.get("last_error"))
+    elif out.status == "incomplete":
+        # The run stopped early. Azure says why in incomplete_details -
+        # usually max tokens or a content filter. Worth surfacing: the
+        # answer may be truncated mid-sentence.
+        out.error = f"run ended early: {run.get('incomplete_details') or 'no reason given'}"
+    elif out.status in ("cancelled", "cancelling", "expired"):
+        out.error = f"run {out.status}"
+
+
+def _record_usage(out: TurnResult, run: dict) -> None:
+    usage = run.get("usage") or {}
+    out.prompt_tokens = usage.get("prompt_tokens") or 0
+    out.completion_tokens = usage.get("completion_tokens") or 0
+
+
+def _record_turn(span, out: TurnResult) -> None:
+    """The agent.turn span's attributes, from one list: a streamed turn has to
+    look the same in the trace as a polled one."""
+    telemetry.set(
+        span,
+        run_id=out.run_id,
+        status=out.status,
+        searched=out.searched,
+        tool_count=len(out.tool_calls),
+        tools=[c.name for c in out.tool_calls],
+        prompt_tokens=out.prompt_tokens,
+        completion_tokens=out.completion_tokens,
+        duration_ms=out.duration_ms,
+        error=out.error,
+    )
+
+
+def _cancel(client: FoundryAgents, thread_id: str, run_id: str) -> None:
+    """Best effort: the turn has already been given up on, and failing to stop
+    the run must not turn that into an exception."""
+    try:
+        client.cancel_run(thread_id, run_id)
+    except Exception:  # noqa: BLE001 - cancelling is best effort
+        pass
 
 
 def _latest_assistant_text(client: FoundryAgents, thread_id: str) -> str:
@@ -325,8 +363,7 @@ def ask(
     run = client.create_thread_and_run(agent_id, question)
     thread_id = run.get("thread_id", "")
     try:
-        turn = run_turn(client, agent_id, thread_id, timeout=timeout, agent_name=agent_name,
-                        run=run, on_event=on_event)
+        turn = run_turn(client, run, timeout=timeout, agent_name=agent_name, on_event=on_event)
         emit(on_event, kind="agent", name=agent_name, state="done", ms=turn.duration_ms,
              tokens=turn.prompt_tokens + turn.completion_tokens, ok=turn.ok)
         return turn
@@ -399,18 +436,7 @@ def ask_streaming(
         finally:
             emit(on_event, kind="agent", name=agent_name, state="done" if out.status else "failed",
                  ms=out.duration_ms, tokens=out.prompt_tokens + out.completion_tokens, ok=out.ok)
-            telemetry.set(
-                turn_span,
-                run_id=out.run_id,
-                status=out.status,
-                searched=out.searched,
-                tool_count=len(out.tool_calls),
-                tools=[c.name for c in out.tool_calls],
-                prompt_tokens=out.prompt_tokens,
-                completion_tokens=out.completion_tokens,
-                duration_ms=out.duration_ms,
-                error=out.error,
-            )
+            _record_turn(turn_span, out)
             if out.thread_id:
                 _CLEANUP.submit(_delete_thread, client, out.thread_id)
     return out
@@ -474,15 +500,14 @@ def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResul
 
             elif event == "thread.run.requires_action":
                 rounds += 1
-                if rounds > 8:
-                    out.status, out.error = "requires_action", "stopped after 8 rounds of tool calls (possible loop)"
+                if _too_many_rounds(out, rounds):
                     break
                 if on_status:
                     for call in ((data.get("required_action") or {}).get("submit_tool_outputs") or {}).get("tool_calls") or []:
                         said = TOOL_STATUS.get((call.get("function") or {}).get("name", ""))
                         if said:
                             on_status(said)
-                outputs = _run_requested_tools(data, out, agent_name=out.agent_name, on_event=on_event)
+                outputs = _run_requested_tools(data, out, on_event)
                 if outputs is None:  # an action we do not handle
                     out.status = "requires_action"
                     out.error = "run needs an action we do not handle"
@@ -492,51 +517,6 @@ def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResul
 
             elif event in ("thread.run.completed", "thread.run.failed", "thread.run.incomplete",
                            "thread.run.cancelled", "thread.run.expired"):
-                out.status = _status_of(data)
-                usage = data.get("usage") or {}
-                out.prompt_tokens = usage.get("prompt_tokens") or 0
-                out.completion_tokens = usage.get("completion_tokens") or 0
-                if out.status == "failed":
-                    out.error = _error_text(data.get("last_error"))
-                elif out.status == "incomplete":
-                    out.error = f"run ended early: {data.get('incomplete_details') or 'no reason given'}"
-                elif out.status in ("cancelled", "expired"):
-                    out.error = f"run {out.status}"
+                _record_ending(out, data)
+                _record_usage(out, data)
         events = next_events
-
-
-def _run_requested_tools(run: dict, out: TurnResult, agent_name: str, on_event=None) -> list[dict] | None:
-    """Execute the tools a run asked for, recording each one. Shared shape with
-    the polling loop: same records, same spans, same error strings."""
-    action = run.get("required_action") or {}
-    if action.get("type") != "submit_tool_outputs":
-        return None
-
-    outputs: list[dict] = []
-    for call in (action.get("submit_tool_outputs") or {}).get("tool_calls") or []:
-        if call.get("type") != "function":
-            outputs.append({"tool_call_id": call.get("id"), "output": "ERROR: unsupported tool type"})
-            continue
-        name = call["function"]["name"]
-        raw_args = call["function"].get("arguments") or ""
-
-        emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
-        with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
-            t0 = time.time()
-            result = tools.execute(name, raw_args)
-            ms = int((time.time() - t0) * 1000)
-            emit(on_event, kind="tool", agent=agent_name, name=name, state="done",
-                 ms=ms, failed=result.startswith("ERROR:"))
-            telemetry.set(ts, duration_ms=ms, failed=result.startswith("ERROR:"),
-                          args=raw_args[:500] if raw_args else "", result_head=result[:200])
-
-        try:
-            parsed = json.loads(raw_args) if raw_args else {}
-        except json.JSONDecodeError:
-            parsed = {"_raw": raw_args}
-        out.tool_calls.append(ToolCallRecord(
-            name=name, arguments=parsed if isinstance(parsed, dict) else {"_raw": raw_args},
-            output_preview=result[:300], duration_ms=ms, failed=result.startswith("ERROR:")))
-        log.info("  tool %s(%s) -> %dms%s", name, parsed, ms, " FAILED" if result.startswith("ERROR:") else "")
-        outputs.append({"tool_call_id": call["id"], "output": result})
-    return outputs
