@@ -162,6 +162,60 @@ text and find the document it came from.
 
 ---
 
+### One ticket per conversation
+
+A conversation gets one ticket, however many messages it runs to and however
+many agents ask. On 21 September one brake conversation raised three: diagnostics
+and escalation each raised one for the first message, and diagnostics raised
+another for the next, under the reply's own line that the first still stood.
+Three things now hold the rule:
+
+- **`tools.OneTicket`.** Every `raise_ticket` call for one message goes through
+  the same one, including calls from specialists running at the same time. While
+  a ticket stands in the conversation (`router.ticket_already_raised`), any call
+  is given that reference and nothing is raised. When escalation is on the
+  route, only escalation may raise one. Otherwise the first call raises it and
+  every later call gets the same reference.
+- **One voice for the ticket.** When a ticket stands, the router says so in its
+  own sentence (`router.TICKET_STANDS`). When escalation raised it, escalation
+  says it. Whatever any other agent says about a ticket is dropped from the
+  reply (`router._leave_the_ticket_to`), and a ticket the reply forgot to name
+  is named, so the next message can find it.
+- **Only escalation has `raise_ticket`.** Diagnostics offers an advisor's call
+  instead, and escalation makes it when the customer says yes. This lives in
+  `agents/definitions/diagnostics.json`, so it only takes effect when the agents
+  are redeployed (`make agents`, which the app deploy does not do); until then the first two
+  hold the rule on their own.
+
+Who calls `raise_ticket`. Once diagnostics is redeployed, only `escalation`
+should appear here.
+
+```kql
+dependencies
+| where timestamp > ago(7d)
+| where name == "tool.call"
+| where tostring(customDimensions["autoassist.tool"]) == "raise_ticket"
+| summarize calls = count() by agent = tostring(customDimensions["autoassist.agent"])
+```
+
+Messages where an agent asked for a ticket, and whether one was raised. More
+requests than tickets is `OneTicket` turning the extras away. A message with
+`ticket_raised` true and a ticket reference already earlier in the same
+conversation would be a bug; the service logs say `nothing raised` for every
+call that was turned away, with the reference it was given instead.
+
+```kql
+dependencies
+| where timestamp > ago(7d)
+| where name == "chat.request"
+| where isnotempty(customDimensions["autoassist.ticket_requests"])
+| summarize messages = count(),
+            raised = countif(tobool(customDimensions["autoassist.ticket_raised"]))
+  by requests = toint(customDimensions["autoassist.ticket_requests"])
+```
+
+---
+
 ## Too busy: refusals, throttling and the cache
 
 Three different things look like "it is slow or it is not answering", and they
