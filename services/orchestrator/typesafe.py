@@ -9,7 +9,9 @@ That shape fits exactly one part of this service: triage, which reads a message
 and decides who should handle it and whether it looks like a safety issue.
 jev_triage.py uses this client on the live request path when TRIAGE_BACKEND=jev,
 and evals/compare_triage.py uses it to measure Jev against the triage agent
-(docs/evaluation.md, finding 16).
+(docs/evaluation.md, finding 16). Both ask only yes/no questions - one per
+specialist, and one for safety - so this module builds only noul questions and
+reads back only their probabilities.
 
 No vendor SDK, for the reasons in docs/decisions/007: it is one JSON POST, and
 `typesafe-sdk` needs Python 3.10+ while the local venv the evals run in is 3.9 -
@@ -109,11 +111,6 @@ def noul(instructions: str, true_means: str = "", false_means: str = "") -> dict
     return question
 
 
-def choice(instructions: str, options: dict) -> dict:
-    """Pick one of `options` - a map of option name to what that option means."""
-    return {"type": "choice", "instructions": instructions, "criteria": options}
-
-
 def ask(state, questions: dict, http: httpx.Client | None = None,
         timeout: httpx.Timeout | float | None = None, retries: int = azure_http.MAX_RETRIES) -> dict:
     """Put `questions` to Jev about `state`. Returns {"answers": ..., "usage": ...}.
@@ -209,12 +206,3 @@ def probability(answers: dict, name: str) -> float | None:
         return None
     value = found.get("noul")
     return float(value) if isinstance(value, (int, float)) else None
-
-
-def chosen(answers: dict, name: str) -> tuple[str | None, dict]:
-    """A choice answer as (option, probabilities)."""
-    found = (answers or {}).get(name)
-    if not isinstance(found, dict):
-        return None, {}
-    options = found.get("probabilities")
-    return found.get("choice"), options if isinstance(options, dict) else {}

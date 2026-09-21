@@ -5,7 +5,8 @@ to scripts/ingest.py's text layout breaks these rather than the Library tab.
 """
 
 import threading
-import time
+
+import pytest
 
 from services.orchestrator import library
 
@@ -33,6 +34,14 @@ MAINT = {
     "Replace on time even if the car is barely used.\n"
     "Typical workshop time: 45 minutes.",
 }
+
+
+@pytest.fixture(autouse=True)
+def cold_cache():
+    """Every test starts with the library unread, and leaves it that way."""
+    library._LIBRARY.clear()
+    yield
+    library._LIBRARY.clear()
 
 
 def tsb(section, text, page=1, number="TSB-010"):
@@ -149,7 +158,6 @@ def test_load_is_cached(monkeypatch):
         return [DTC, MAINT, HEADER]
 
     monkeypatch.setattr(library.retrieval, "fetch_all", fetch_all)
-    monkeypatch.setattr(library, "_cache", {"at": 0.0, "data": None})
 
     first = library.load()
     second = library.load()
@@ -161,35 +169,37 @@ def test_load_is_cached(monkeypatch):
 # ------------------------------------------------- the cache under concurrent readers
 
 
-def _slow_fetch(delay=0.3, fail=False):
+class SearchDown(Exception):
+    """What the fake search raises. Not a RuntimeError, because a broken
+    barrier is one, and a failure test must not pass on the wrong error."""
+
+
+def _fetch_together(readers, fail=False):
     """Stand-in for the Azure Search call load() makes when the cache is cold.
 
-    Sleeping is the point: a real fetch is entirely waiting on Azure, so what
-    the counters record is whether two readers were on the wire at the same
-    time or one was sitting behind the other holding a threadpool thread.
+    No call returns until `readers` of them are inside at once. A real fetch is
+    entirely waiting on Azure, so what matters is whether several readers can be
+    on the wire at the same time or each sits behind the one ahead, holding a
+    threadpool thread. If a lock spanned the fetch the barrier could never fill:
+    it times out, and every reader gets BrokenBarrierError instead of an answer.
     """
-    lock = threading.Lock()
-    state = {"inside": 0, "peak": 0, "calls": 0}
+    barrier = threading.Barrier(readers, timeout=5)
+    calls = []
 
     def fetch_all(fields, top=1000):
-        with lock:
-            state["inside"] += 1
-            state["calls"] += 1
-            state["peak"] = max(state["peak"], state["inside"])
-        time.sleep(delay)
-        with lock:
-            state["inside"] -= 1
+        calls.append(1)
+        barrier.wait()
         if fail:
-            raise RuntimeError("search is down")
+            raise SearchDown("search is down")
         return [DTC, MAINT, HEADER]
 
-    fetch_all.state = state
+    fetch_all.calls = calls
     return fetch_all
 
 
 def _load_concurrently(n):
     """n threads into load() at once. Returns what each got - a dict or the
-    exception it raised - and the wall clock for all of them."""
+    exception it raised."""
     out = []
 
     def one():
@@ -199,35 +209,25 @@ def _load_concurrently(n):
             out.append(e)
 
     threads = [threading.Thread(target=one) for _ in range(n)]
-    start = time.time()
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    return out, time.time() - start
+    return out
 
 
 def test_the_search_runs_outside_the_lock(monkeypatch):
     """/library is a sync endpoint, so each reader holds one of Starlette's 40
     threadpool threads for as long as load() takes, and /health - also sync -
     queues behind whatever is left. While the lock spanned the search, readers
-    could only ever be on the wire one at a time; this asserts the structure
-    that stops that, which is what test_a_failed_fetch_is_not_paid_for_n_times
-    then measures the cost of.
+    could only ever be on the wire one at a time; the barrier fills only if all
+    eight are searching together."""
+    monkeypatch.setattr(library.retrieval, "fetch_all", _fetch_together(8))
 
-    Wall clock is deliberately not asserted here: when the fetch succeeds the
-    queued readers are released by the first one's result, so a burst costs one
-    delay either way. The lock only shows its price when the fetch does not
-    produce a value the others can use.
-    """
-    fetch = _slow_fetch(delay=0.3)
-    monkeypatch.setattr(library.retrieval, "fetch_all", fetch)
-    monkeypatch.setattr(library, "_cache", {"at": 0.0, "data": None})
+    results = _load_concurrently(8)
 
-    results, _ = _load_concurrently(8)
-
+    assert all(isinstance(r, dict) for r in results), f"the readers queued: {results[0]!r}"
     assert all(r["counts"]["bulletins"] == 1 for r in results)
-    assert fetch.state["peak"] > 1, "no two fetches overlapped - the lock spanned the search"
 
 
 def test_a_failed_fetch_is_not_paid_for_n_times(monkeypatch):
@@ -242,29 +242,27 @@ def test_a_failed_fetch_is_not_paid_for_n_times(monkeypatch):
     threadpool empties, /health cannot get a thread, the Dockerfile HEALTHCHECK
     fails its three 4s tries, and the container is restarted - because people
     looked at the document list.
+
+    Six readers still make six fetches, but side by side: the barrier opens
+    only when all six are on the wire together.
     """
-    fetch = _slow_fetch(delay=0.3, fail=True)
-    monkeypatch.setattr(library.retrieval, "fetch_all", fetch)
-    monkeypatch.setattr(library, "_cache", {"at": 0.0, "data": None})
+    monkeypatch.setattr(library.retrieval, "fetch_all", _fetch_together(6, fail=True))
 
-    results, elapsed = _load_concurrently(6)
+    results = _load_concurrently(6)
 
-    # Every reader still gets its error - /library answers 503, it does not hang.
-    assert all(isinstance(r, RuntimeError) for r in results)
-    # Serialised this is 6 * 0.3 = 1.8s. Generous headroom for a slow CI runner
-    # while still failing if the readers queued behind each other.
-    assert elapsed < 1.0, f"took {elapsed:.2f}s - each reader paid for the ones ahead of it"
+    # Every reader gets the search's own error - /library answers 503, it does
+    # not hang - and not a broken barrier, which would mean they queued.
+    assert all(isinstance(r, SearchDown) for r in results), f"the readers queued: {results[0]!r}"
 
 
 def test_the_burst_still_leaves_the_library_cached(monkeypatch):
     """Racing readers may each pay for a search - that is the trade the lock
     stopped making - but the last one to finish must still fill the cache, or
     every page view afterwards would search again."""
-    fetch = _slow_fetch(delay=0.05)
+    fetch = _fetch_together(4)
     monkeypatch.setattr(library.retrieval, "fetch_all", fetch)
-    monkeypatch.setattr(library, "_cache", {"at": 0.0, "data": None})
 
     _load_concurrently(4)
-    during_burst = fetch.state["calls"]
+    during_burst = len(fetch.calls)
     library.load()
-    assert fetch.state["calls"] == during_burst, "the burst left nothing cached"
+    assert len(fetch.calls) == during_burst, "the burst left nothing cached"

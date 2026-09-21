@@ -21,7 +21,7 @@ def telemetry_off(monkeypatch):
 
 def test_setup_is_off_without_a_connection_string():
     assert telemetry.setup() is False
-    assert telemetry.enabled() is False
+    assert telemetry._ENABLED is False
 
 
 def test_setup_never_raises_on_a_bad_connection_string(monkeypatch):

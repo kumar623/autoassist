@@ -115,6 +115,16 @@ def test_sunday_returns_no_slots_with_a_reason():
     assert "closed" in r["note"].lower()
 
 
+def test_a_corrupt_store_is_logged_not_fatal(caplog):
+    """The next booking saved overwrites the unreadable file, so whatever was in
+    it is lost. The service carries on, and the log says so."""
+    booking.STORE.write_text("{not json")
+    with caplog.at_level("WARNING", logger=booking.__name__):
+        r = booking.get_slots(days=1)
+    assert r["ok"] and r["count"] > 0
+    assert any("unreadable" in m and str(booking.STORE) in m for m in caplog.messages)
+
+
 def test_safety_ticket_promises_an_hour():
     r = booking.create_ticket("spongy brakes", "safety", "AP31AB1234")
     assert r["ok"]
