@@ -31,7 +31,7 @@ _ENABLED = False
 _tracer = None
 
 
-def setup(service_name: str = "autoassist-orchestrator") -> bool:
+def setup() -> bool:
     """Wire up Azure Monitor if a connection string is present.
 
     Returns True if telemetry is on. Never raises - a monitoring problem must
@@ -44,13 +44,15 @@ def setup(service_name: str = "autoassist-orchestrator") -> bool:
         log.info("telemetry off (APPLICATIONINSIGHTS_CONNECTION_STRING not set)")
         return False
 
-    # Azure Monitor auto-instruments every library it recognises, and logs a
-    # stack trace for each one that is not installed. We use FastAPI, requests
-    # and urllib3; the rest is noise on startup.
-    os.environ.setdefault(
-        "OTEL_PYTHON_DISABLED_INSTRUMENTATIONS",
-        "psycopg2,django,flask,mysql,pymysql,sqlalchemy,redis,celery,botocore,aiohttp-client",
-    )
+    # Azure Monitor instruments only the libraries on its own list - azure_sdk,
+    # django, fastapi, flask, psycopg2, requests, urllib and urllib3 in 1.6.13 -
+    # and ignores any other name set here. The service uses FastAPI, and
+    # azure-identity fetches its tokens through the Azure SDK and requests. Our
+    # own calls go through httpx, which is not on the list at all (decision
+    # 007), so our spans are what record them. django, flask and psycopg2 are
+    # not installed: psycopg2 logs a stack trace on every start when it finds
+    # that out, and the other two a debug line each.
+    os.environ.setdefault("OTEL_PYTHON_DISABLED_INSTRUMENTATIONS", "psycopg2,django,flask")
 
     try:
         from azure.monitor.opentelemetry import configure_azure_monitor
@@ -63,7 +65,7 @@ def setup(service_name: str = "autoassist-orchestrator") -> bool:
             # sampled-out trace is exactly the one you wanted during an incident.
             # Revisit if traffic ever justifies it.
         )
-        _tracer = trace.get_tracer(service_name)
+        _tracer = trace.get_tracer("autoassist-orchestrator")
         _ENABLED = True
         log.info("telemetry on -> Application Insights")
         return True
@@ -77,10 +79,6 @@ def setup(service_name: str = "autoassist-orchestrator") -> bool:
     except Exception as e:  # noqa: BLE001
         log.exception("telemetry setup failed, carrying on without it: %s", e)
         return False
-
-
-def enabled() -> bool:
-    return _ENABLED
 
 
 @contextmanager
