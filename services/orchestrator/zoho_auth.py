@@ -42,9 +42,8 @@ class ZohoAuthError(Exception):
     pass
 
 
-def discover(mcp_url: str, http: httpx.Client | None = None) -> dict:
+def discover(mcp_url: str, http: httpx.Client) -> dict:
     """The authorization server's metadata, found the way the MCP spec says."""
-    http = http or azure_http.new_client()
     host = httpx.URL(mcp_url).host
     resource = http.get(f"https://{host}/.well-known/oauth-protected-resource").json()
     issuer = (resource.get("authorization_servers") or [f"https://{host}"])[0].rstrip("/")
