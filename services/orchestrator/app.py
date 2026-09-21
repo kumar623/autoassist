@@ -34,7 +34,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import jev_triage, library, limits, roster, telemetry
+from . import jev_triage, library, limits, roster, telemetry, typesafe
 from . import router as routing
 from .foundry import FoundryAgents
 
@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
 
     if STATE.get("client"):
         STATE["client"].close()
+    typesafe.close()
 
 
 app = FastAPI(title="AutoAssist", version="0.2.0", lifespan=lifespan)

@@ -1031,7 +1031,10 @@ def _handle_inner(
     # unreachable, a question unanswered. A classifier being down is a reason to
     # use the model that was doing this before, not to fail the customer.
     if jev_triage.configured():
-        classified = jev_triage.classify(message, history)
+        # The same window of history the agent path reads (_recent). The API
+        # accepts 20 turns of 8,000 characters; none of that needs to go to a
+        # third party to decide who answers a message.
+        classified = jev_triage.classify(message, (history or [])[-MAX_HISTORY_TURNS:])
         if classified is not None:
             decision = _decision_from_jev(classified, message)
             out.decision = decision

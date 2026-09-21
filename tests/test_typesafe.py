@@ -181,6 +181,33 @@ def test_a_server_that_cannot_be_reached_is_an_error(no_waiting):
         typesafe.ask("x", {"q": typesafe.noul("?")}, http=c)
 
 
+def test_a_short_throttle_on_the_last_attempt_is_reported_not_crashed(no_waiting):
+    """Three 529s then a brief 429 used to fall out of the loop into
+    AssertionError('unreachable'), which jev_triage then logged as an
+    unexpected failure rather than as Jev being busy."""
+    c = client(*[httpx.Response(typesafe.OVERLOADED)] * azure_http.MAX_RETRIES,
+               httpx.Response(429, headers={"retry-after": "1"}))
+    with pytest.raises(typesafe.TypeSafeUnavailable, match="rate limiting"):
+        typesafe.ask("x", {"q": typesafe.noul("?")}, http=c)
+
+
+def test_no_retries_means_one_attempt(no_waiting):
+    """What jev_triage asks for: its fallback is the retry."""
+    c = client(httpx.ConnectError("down"))
+    with pytest.raises(typesafe.TypeSafeUnavailable):
+        typesafe.ask("x", {"q": typesafe.noul("?")}, http=c, retries=0)
+    assert len(c.seen) == 1 and no_waiting == []
+
+
+def test_a_request_httpx_will_not_send_is_not_retried(no_waiting):
+    """LocalProtocolError quotes the header it refuses, which is the key."""
+    c = client(httpx.LocalProtocolError("Illegal header value b'Bearer ts-s3cr3tkey0123456789 '"))
+    with pytest.raises(typesafe.TypeSafeUnavailable) as e:
+        typesafe.ask("x", {"q": typesafe.noul("?")}, http=c)
+    assert len(c.seen) == 1
+    assert "s3cr3tkey" not in str(e.value) and e.value.__cause__ is None
+
+
 # --------------------------------------------------------- keeping the key
 
 
@@ -227,8 +254,9 @@ def test_asking_nothing_is_refused():
 
 
 def test_importing_never_raises_however_it_is_configured(monkeypatch):
-    """This module is imported by an eval script, not by the service - but the
-    rule is the same one limits.setting() exists for."""
+    """The service imports this module (through jev_triage) whether or not Jev
+    is switched on, so a bad setting must not stop it starting - the rule
+    limits.setting() exists for."""
     import importlib
 
     monkeypatch.setenv("TYPESAFE_MODEL", "")

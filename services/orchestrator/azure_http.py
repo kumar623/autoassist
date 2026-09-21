@@ -4,13 +4,15 @@ The service calls three Azure APIs - Foundry agents, AI Search and Azure OpenAI
 embeddings - directly, without their SDKs (docs/decisions/007). The SDKs did
 three things for free that every call still needs, so they live here, once:
 
-  - Retries on throttling and short Azure outages: 408, 429, 500, 502, 503, 504
-    and dropped connections, the same set azure-core retried. Azure's
-    Retry-After header is honoured, otherwise backoff doubles from 0.5s.
+  - Retries on short Azure outages: 408, 500, 502, 503, 504 and dropped
+    connections, the same set azure-core retried, with Azure's Retry-After
+    honoured and otherwise a backoff doubling from 0.5s. Throttling (429) is
+    different: one quick retry at most, then Throttled - see below.
   - A timeout on every call. A call with no timeout is how a request hangs
     forever (docs/evaluation.md, the side note under finding 5).
   - Error responses become an exception carrying Azure's own message, rather
-    than a bare status code.
+    than a bare status code - and never httpx's own exception, which can quote
+    the API key (see Unreachable).
 
 Like azure-core, this retries writes too. A 5xx or dropped connection on
 "create run" could in principle mean the run was created and the reply lost; a
@@ -47,6 +49,12 @@ THROTTLE_PATIENCE_SECONDS = 2.0
 # index, a run being created). The run loop has its own overall limit.
 TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
+# Failures that happen before anything leaves this machine: httpx refused to
+# build the request. Trying again sends the same malformed request, so these are
+# not retried. Seen on 21 September: a key pasted with page text around it made
+# every embedding call fail three times over 3.5s before giving up.
+NOT_SENT = (httpx.LocalProtocolError, httpx.UnsupportedProtocol)
+
 # Indirection so tests can skip the waiting.
 _pause = time.sleep
 
@@ -74,6 +82,23 @@ class Throttled(AzureError):
         self.retry_after = retry_after
 
 
+class Unreachable(AzureError):
+    """No answer came back: the connection failed or timed out, or httpx would
+    not send the request at all.
+
+    Raised in place of httpx's own exception, which is not safe to pass on. An
+    illegal header value makes httpx raise LocalProtocolError quoting the value
+    in full, and the header it objects to is the one carrying the API key - so
+    the key would reach the log, the App Insights span, and the tool output the
+    model reads. Only the method, the path and the kind of failure are kept.
+    """
+
+    def __init__(self, method: str, url: str, error: Exception):
+        Exception.__init__(self, f"{method} {_path(url)} -> no answer: {type(error).__name__}")
+        self.status = 0
+        self.message = type(error).__name__
+
+
 def new_client() -> httpx.Client:
     return httpx.Client(timeout=TIMEOUT)
 
@@ -93,8 +118,10 @@ def request(
         try:
             r = client.request(method, url, headers=headers, params=params, json=json)
         except httpx.TransportError as e:
-            if attempt == MAX_RETRIES:
-                raise
+            if attempt == MAX_RETRIES or isinstance(e, NOT_SENT):
+                # `from None`, so the original - and the value it quotes - is not
+                # printed as the cause by any log.exception further up.
+                raise Unreachable(method, url, e) from None
             log.warning("%s %s failed (%s), retrying", method, _path(url), type(e).__name__)
             _pause(_backoff(attempt, None))
             continue
@@ -102,7 +129,9 @@ def request(
         if r.status_code == 429:
             advised = r.headers.get("retry-after")
             wait = _backoff(throttles, advised)
-            if throttles < THROTTLE_RETRIES and wait <= THROTTLE_PATIENCE_SECONDS:
+            # `attempt < MAX_RETRIES` as well: a quick retry on the last attempt
+            # used to fall out of the loop into the AssertionError below.
+            if throttles < THROTTLE_RETRIES and wait <= THROTTLE_PATIENCE_SECONDS and attempt < MAX_RETRIES:
                 throttles += 1
                 log.warning("%s %s -> throttled, waiting %.1fs", method, _path(url), wait)
                 _pause(wait)

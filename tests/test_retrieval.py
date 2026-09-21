@@ -136,3 +136,15 @@ def test_a_different_question_is_searched_again(azure):
     retrieval.search("P0420")
     retrieval.search("P0300")
     assert len(azure["seen"]) == 4
+
+
+def test_keys_are_sent_without_the_whitespace_a_paste_brings(azure, monkeypatch):
+    """A trailing space or newline is an illegal header value: httpx refuses to
+    send the request at all, and search fails on every message."""
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "oai-key\n")
+    monkeypatch.setenv("SEARCH_API_KEY", "  search-key ")
+    azure["results"] = [hit(1, 0.03)]
+    retrieval.search("P0420")
+    emb, srch = azure["seen"]
+    assert emb.headers["api-key"] == "oai-key"
+    assert srch.headers["api-key"] == "search-key"
