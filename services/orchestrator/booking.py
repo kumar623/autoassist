@@ -1,8 +1,12 @@
-"""Service slot booking.
+"""Service slot booking and tickets, kept in JSON files.
 
-Storage is a JSON file for now. Week 3 swaps it for Azure Table Storage - the
-interface here (get_slots / book_slot / cancel_booking) stays the same, so that
-is a change to this file only.
+This is the file backend: the default, and the offline double the tests and
+evals use. With BOOKING_BACKEND=zoho, tools.py sends bookings to the workshop's
+Zoho Bookings calendar instead (zoho_bookings.py, decision 008). Both offer the
+same functions - get_slots, book_slot, move_booking, cancel_booking,
+get_booking - so the tools and the prompts work either way. The file lives in
+the container and is lost on every deploy. Tickets (create_ticket) are kept
+here whichever backend takes the bookings.
 
 The rule that matters: book_slot is the only thing that creates a booking, and
 it returns the reference. The agent must never invent a confirmation. A made-up
@@ -12,6 +16,7 @@ booking reference is the booking equivalent of a fabricated citation.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import random
@@ -20,7 +25,9 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 
-STORE = pathlib.Path(os.getenv("BOOKING_STORE", "data/bookings.json"))
+log = logging.getLogger(__name__)
+
+STORE =pathlib.Path(os.getenv("BOOKING_STORE", "data/bookings.json"))
 _LOCK = threading.Lock()
 
 OPENING_HOURS = ["09:00", "10:30", "12:00", "14:00", "15:30", "17:00"]
@@ -44,8 +51,10 @@ def _load() -> dict:
         return {"bookings": {}}
     try:
         return json.loads(STORE.read_text())
-    except json.JSONDecodeError:
-        # A corrupt store should not take the service down, but it must be loud.
+    except json.JSONDecodeError as e:
+        # A corrupt store should not take the service down, but it must be loud:
+        # the next booking saved overwrites it, and whatever was in it is gone.
+        log.warning("booking store %s is unreadable (%s); carrying on as if it were empty", STORE, e)
         return {"bookings": {}, "_warning": "store was unreadable and has been reset"}
 
 
@@ -150,7 +159,7 @@ def book_slot(slot_id: str, registration: str, issue: str, customer: dict | None
     if not slot_id or not registration:
         return {"ok": False, "error": "slot_id and registration are both required."}
 
-    reg = registration.upper().replace(" ", "")
+    reg = _norm(registration)
 
     with _LOCK:
         data = _load()
@@ -333,7 +342,7 @@ def create_ticket(summary: str, urgency: str = "normal", registration: str = "")
             "reference": ref,
             "summary": summary,
             "urgency": urgency,
-            "registration": registration.upper().replace(" ", ""),
+            "registration": _norm(registration),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "status": "open",
         }

@@ -59,7 +59,9 @@ import re
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 
-from .booking import _parse_date  # one date parser for both backends
+# One date parser, one way of writing a registration and one "not found" for
+# both backends, so a customer is told the same thing whichever one is live.
+from .booking import _norm, _not_found, _parse_date
 from .cache import TimedCache
 from .mcp_client import McpClient, McpError
 from .zoho_auth import ZohoAuth
@@ -121,10 +123,6 @@ def _failed(result: dict) -> str | None:
     return None
 
 
-def _norm(registration: str | None) -> str:
-    return (registration or "").upper().replace(" ", "")
-
-
 def _slot_id(when: datetime) -> str:
     return f"{when.date().isoformat()}-{when.strftime('%H%M')}"
 
@@ -158,15 +156,6 @@ def _appointment(record: dict) -> dict:
         "registration": _norm(from_field) if from_field else (_norm(found.group(1)) if found else ""),
         "issue": notes.split("|", 1)[-1].strip() if "|" in notes else notes.strip(),
         "status": "confirmed" if record.get("status") == "upcoming" else str(record.get("status") or ""),
-    }
-
-
-def _not_found(reference: str, registration: str) -> dict:
-    """Same answer whether it does not exist or belongs to someone else."""
-    return {
-        "ok": False,
-        "error": f"No booking found with reference {reference} for registration "
-        f"{_norm(registration) or '(none given)'}. Check both with the customer.",
     }
 
 
@@ -303,6 +292,11 @@ def book_slot(slot_id: str, registration: str, issue: str, customer: dict | None
 
     if not slot_id or not reg:
         return {"ok": False, "error": "slot_id and registration are both required."}
+    # tools.book_service_slot refuses first, so the live app never reaches this
+    # without all three. Kept as defence in depth: this is the function that
+    # talks to Zoho, and a caller that skips the tool layer - a script, a test,
+    # a future tool - should get a plain answer here, not a booking Zoho refuses
+    # ("invalid phone_number") or one with nobody to email.
     missing = [what for what, value in (("name", name), ("email", email), ("phone number", phone)) if not value]
     if missing:
         return {"ok": False, "error": f"The booking calendar needs the customer's {', '.join(missing)}. Ask for it."}
