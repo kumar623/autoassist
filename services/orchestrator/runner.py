@@ -142,18 +142,24 @@ def run_turn(
     timeout: float = 90.0,
     agent_name: str = "",
     on_event=None,
+    tickets: tools.OneTicket | None = None,
 ) -> TurnResult:
     """Poll a run that has already started until it ends, running its tools.
 
     `run` comes from ask(), which starts it in the same call that creates the
     thread, so it arrives carrying its thread_id.
+
+    `tickets` is the customer message's OneTicket, shared with every other turn
+    answering it. A turn run on its own - agents/ask.py, an eval case - gets one
+    of its own, so it too raises one ticket at most, however many rounds it takes.
     """
     started = time.time()
     thread_id = run.get("thread_id", "")
     out = TurnResult(thread_id=thread_id, agent_name=agent_name)
+    tickets = tickets if tickets is not None else tools.OneTicket()
 
     with telemetry.span("agent.turn", agent=agent_name, thread_id=thread_id) as turn_span:
-        _run_turn_inner(client, run, timeout, out, started, on_event)
+        _run_turn_inner(client, run, timeout, out, started, on_event, tickets)
         _record_turn(turn_span, out)
     return out
 
@@ -165,6 +171,7 @@ def _run_turn_inner(
     out: TurnResult,
     started: float,
     on_event=None,
+    tickets: tools.OneTicket | None = None,
 ) -> None:
     thread_id, run_id = out.thread_id, run["id"]
     out.run_id = run_id
@@ -195,7 +202,7 @@ def _run_turn_inner(
                 _cancel(client, thread_id, run_id)
                 break
 
-            outputs = _run_requested_tools(run, out, on_event)
+            outputs = _run_requested_tools(run, out, on_event, tickets)
             if outputs is None:
                 action_type = (run.get("required_action") or {}).get("type")
                 out.status = status
@@ -218,12 +225,14 @@ def _run_turn_inner(
 # ------------------------------------------------- shared by polling and streaming
 
 
-def _run_requested_tools(run: dict, out: TurnResult, on_event=None) -> list[dict] | None:
+def _run_requested_tools(run: dict, out: TurnResult, on_event=None,
+                         tickets: tools.OneTicket | None = None) -> list[dict] | None:
     """Execute the tools a run asked for, recording each one, and return the
     outputs to submit - or None when the run wants an action we do not handle.
 
     Both paths come through here, so a tool call leaves the same record, span
-    and panel events whether the answer was polled or streamed.
+    and panel events whether the answer was polled or streamed - and every
+    raise_ticket meets the same OneTicket, whichever path and thread it came from.
     """
     action = run.get("required_action") or {}
     if action.get("type") != "submit_tool_outputs":
@@ -242,7 +251,7 @@ def _run_requested_tools(run: dict, out: TurnResult, on_event=None) -> list[dict
         emit(on_event, kind="tool", agent=agent_name, name=name, state="running")
         with telemetry.span("tool.call", tool=name, agent=agent_name) as ts:
             t0 = time.time()
-            result = tools.execute(name, raw_args)
+            result = tools.execute(name, raw_args, tickets=tickets, asked_by=agent_name)
             ms = int((time.time() - t0) * 1000)
             failed = result.startswith("ERROR:")
             emit(on_event, kind="tool", agent=agent_name, name=name, state="done", ms=ms, failed=failed)
@@ -347,6 +356,7 @@ def ask(
     timeout: float = 90.0,
     agent_name: str = "",
     on_event=None,
+    tickets: tools.OneTicket | None = None,
 ) -> TurnResult:
     """One question, one fresh thread.
 
@@ -358,12 +368,15 @@ def ask(
     while it happens: which agent is working, which tool it just called, how
     long it took. It may be called from several threads at once - the specialists
     run concurrently - so whatever is behind it has to cope with that.
+
+    `tickets` is the message's OneTicket; see run_turn.
     """
     emit(on_event, kind="agent", name=agent_name, state="working")
     run = client.create_thread_and_run(agent_id, question)
     thread_id = run.get("thread_id", "")
     try:
-        turn = run_turn(client, run, timeout=timeout, agent_name=agent_name, on_event=on_event)
+        turn = run_turn(client, run, timeout=timeout, agent_name=agent_name, on_event=on_event,
+                        tickets=tickets)
         emit(on_event, kind="agent", name=agent_name, state="done", ms=turn.duration_ms,
              tokens=turn.prompt_tokens + turn.completion_tokens, ok=turn.ok)
         return turn
@@ -416,6 +429,7 @@ def ask_streaming(
     agent_name: str = "",
     on_status=None,
     on_event=None,
+    tickets: tools.OneTicket | None = None,
 ) -> TurnResult:
     """One question, one fresh thread, with the answer delivered as it is written.
 
@@ -428,11 +442,13 @@ def ask_streaming(
     """
     started = time.time()
     out = TurnResult(agent_name=agent_name)
+    tickets = tickets if tickets is not None else tools.OneTicket()  # as in run_turn
 
     emit(on_event, kind="agent", name=agent_name, state="working")
     with telemetry.span("agent.turn", agent=agent_name, streamed=True) as turn_span:
         try:
-            _stream_turn(client, agent_id, question, on_delta, timeout, out, started, on_status, on_event)
+            _stream_turn(client, agent_id, question, on_delta, timeout, out, started, on_status, on_event,
+                         tickets)
         finally:
             emit(on_event, kind="agent", name=agent_name, state="done" if out.status else "failed",
                  ms=out.duration_ms, tokens=out.prompt_tokens + out.completion_tokens, ok=out.ok)
@@ -457,10 +473,11 @@ TOOL_STATUS = {
 
 
 def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float,
-                 on_status=None, on_event=None) -> None:
+                 on_status=None, on_event=None, tickets: tools.OneTicket | None = None) -> None:
     answer: list[str] = []
     try:
-        _stream_events(client, agent_id, question, on_delta, timeout, out, started, on_status, answer, on_event)
+        _stream_events(client, agent_id, question, on_delta, timeout, out, started, on_status, answer, on_event,
+                       tickets)
     except azure_http.Throttled as e:
         # Mid-answer throttling: the run started, so some of the answer may
         # already be on the customer's screen. Whatever arrived is kept - it is
@@ -477,7 +494,7 @@ def _stream_turn(client, agent_id, question, on_delta, timeout, out: TurnResult,
 
 
 def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResult, started: float,
-                   on_status, answer: list[str], on_event=None) -> None:
+                   on_status, answer: list[str], on_event=None, tickets: tools.OneTicket | None = None) -> None:
     events = client.stream_thread_and_run(agent_id, question)
     rounds = 0
 
@@ -507,7 +524,7 @@ def _stream_events(client, agent_id, question, on_delta, timeout, out: TurnResul
                         said = TOOL_STATUS.get((call.get("function") or {}).get("name", ""))
                         if said:
                             on_status(said)
-                outputs = _run_requested_tools(data, out, on_event)
+                outputs = _run_requested_tools(data, out, on_event, tickets)
                 if outputs is None:  # an action we do not handle
                     out.status = "requires_action"
                     out.error = "run needs an action we do not handle"
