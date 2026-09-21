@@ -437,6 +437,7 @@ const links = {};       // child key -> <path>
 const lines = {};       // step-list rows, keyed on what the step IS
 let tick = null, sawSafety = false;
 let compareAsked = false, compareShown = false;   // for the message in flight
+let ticketStood = null;   // a ticket that kept escalation off this message's route
 
 // el() is declared with the library code further down and hoisted to here.
 
@@ -590,6 +591,7 @@ function resetPanel() {
   compareEl.hidden = true;
   compareEl.replaceChildren();
   compareShown = false;
+  ticketStood = null;
   if (parts.triage && parts.triage.sub) parts.triage.sub.textContent = parts.triage.subText;
 
   const started = Date.now();
@@ -624,8 +626,12 @@ function onActivity(ev) {
     else said.push(running.join(' + '));
     if (ev.safety) said.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
     if (ev.ticket_stands) said.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
+    ticketStood = ev.ticket_stands || null;
     if (ev.triage_skipped) said.push('Triage skipped: a fault code and nothing else, so the Jev / LLM toggle does not apply.');
     else if (read) said.push(...classifiedBy(t));
+    // Small talk and a cache hit: said whether or not "Compare both" is ticked,
+    // because the toggle is on screen either way and did nothing here.
+    else if (t && t.used === 'none') said.push('No classifier read it, so the Jev / LLM toggle does not apply.');
     else if (ev.backend) said.push(ev.backend === 'jev'
       ? 'Classified by Jev: four probabilities, thresholds in code.'
       : 'Classified by the triage agent: gpt-4.1-mini writing JSON.');
@@ -637,9 +643,9 @@ function onActivity(ev) {
       // The triage line already on the list, extended with what the keyword
       // net did to this classifier's answer - one line, not a second one.
       step('triage', 'turn', triageLine(t), read.ok ? 'done' : 'failed', read.ms || undefined, true);
-      if (parts.triage && parts.triage.sub) {
-        parts.triage.sub.textContent = t.used === 'jev' ? 'Jev · probabilities' : 'LLM · writes JSON';
-      }
+      // Short on purpose: the box is 120px wide and its timing sits on the same
+      // line, right-aligned, from about two thirds of the way across.
+      if (parts.triage && parts.triage.sub) parts.triage.sub.textContent = 'by ' + NAMES[t.used];
     } else if (compareAsked) {
       compareSkipped((t && t.why) || ev.reason || 'no classifier ran');
     }
@@ -728,6 +734,8 @@ function drawToggle() {
   });
   let note = '';
   if (lit === 'jev' && !jevAvailable) note = 'No TypeSafe key on this server: the LLM will read it, and say so.';
+  // Without a key there is no other one to read it: every card would say so.
+  else if (compareBox.checked && !jevAvailable) note = 'No TypeSafe key on this server: Jev cannot be compared.';
   else if (compareBox.checked) note = 'The other one reads each message too, for the panel only.';
   else if (triageChoice !== 'auto' && serverTriage) note = 'Just for your messages; the server default is ' + NAMES[serverTriage] + '.';
   triageNote.textContent = note;
@@ -760,19 +768,30 @@ function scores(p) {
   return Object.keys(p || {}).map(k => k.replace('needs_', '') + ' ' + p[k].toFixed(2)).join('  ');
 }
 
+// The LLM's answer as the router parsed it, not as the model wrote it: parsing
+// drops an intent it does not know and turns an empty list into "other". Not
+// dressed up as JSON, so it is not mistaken for the model's own text.
 function ownAnswer(r) {
   if (!r.ok) return 'did not answer: ' + r.error;
   if (r.backend === 'jev') return scores(r.probabilities);
-  // Its JSON, spaced so a narrow column breaks it between fields, not inside one.
-  return '{"intents": ' + JSON.stringify(r.own_intents).replace(/,/g, ', ') + ', "safety": ' + r.own_safety + '}';
+  return 'intents ' + (r.own_intents || []).join(', ') + ' · safety ' + yesNo(r.own_safety);
+}
+
+// Two places, like every other score on the card - unless rounding would carry
+// the figure across Jev's bar, and "0.70 < 0.7" would read as a contradiction.
+// Then three, which is what the router keeps.
+function against(p, cut) {
+  const two = p.toFixed(2);
+  return (Number(two) >= cut) === (p >= cut) ? two : p.toFixed(3);
 }
 
 function ownSafety(r) {
   if (!r.ok) return '—';
   const p = r.probabilities && r.probabilities.safety;
   if (typeof p !== 'number') return yesNo(r.own_safety);
-  const cut = typeof r.safety_cut === 'number' ? (p >= r.safety_cut ? ' ≥ ' : ' < ') + r.safety_cut : '';
-  return yesNo(r.own_safety) + ' (' + p.toFixed(2) + cut + ')';
+  const c = r.safety_cut;
+  if (typeof c !== 'number') return yesNo(r.own_safety) + ' (' + p.toFixed(2) + ')';
+  return yesNo(r.own_safety) + ' (' + against(p, c) + (p >= c ? ' ≥ ' : ' < ') + c + ')';
 }
 
 // What the keyword net matched in the message, and what that added to this
@@ -832,9 +851,19 @@ function classifiedBy(t) {
 
 function compareHead(r, decided) {
   const d = el('div', 'h');
-  d.append(el('span', null, NAMES[r.backend] || r.backend),
-           el('span', 'role', decided ? 'decided the route' : 'compared only'));
+  const role = decided ? (r.ok ? 'decided the route' : 'chosen; the keywords decided')
+                       : (r.ok ? 'compared only' : 'did not answer');
+  d.append(el('span', null, NAMES[r.backend] || r.backend), el('span', 'role', role));
   return d;
+}
+
+// One verdict for the card's heading and for the step list, so the two cannot
+// disagree. There is only something to agree about when both answered: the
+// router reports no differences otherwise, and that is not agreement.
+function verdictOf(chosen, other, diff) {
+  if (!chosen.ok && !other.ok) return 'neither answered';
+  if (!chosen.ok || !other.ok) return 'only one answered';
+  return diff.size ? 'they differ' : 'they agree';
 }
 
 function drawCompare(c) {
@@ -842,12 +871,11 @@ function drawCompare(c) {
   if (!chosen || !other) return;
   compareShown = true;
   const diff = new Set(c.differences || []);
+  const said = verdictOf(chosen, other, diff);
 
   const h = el('h3', null, NAMES[chosen.backend] + ' vs ' + NAMES[other.backend] + ' on this message');
-  const verdict = el('span', 'verdict');
-  if (!chosen.ok || !other.ok) verdict.textContent = 'only one answered';
-  else if (!diff.size) verdict.textContent = 'they agree';
-  else { verdict.textContent = 'they differ'; verdict.classList.add('differs'); }
+  const verdict = el('span', 'verdict', said);
+  if (said === 'they differ') verdict.classList.add('differs');
   h.append(verdict);
 
   const grid = el('div', 'cmp');
@@ -859,25 +887,30 @@ function drawCompare(c) {
   };
   row('Its own route', routeText(chosen.own_route), routeText(other.own_route), 'own_route');
   row('Its safety call', ownSafety(chosen), ownSafety(other), 'own_safety');
-  row('What it said', ownAnswer(chosen), ownAnswer(other), null, true);
+  // No longer than the other labels: this column takes its width from the longest.
+  row('Parsed answer', ownAnswer(chosen), ownAnswer(other), null, true);
   row('Keyword net', netSaid(chosen), netSaid(other));
-  row('Final route', routeText(chosen.route), routeText(other.route), 'route');
-  row('Final safety', finalSafety(chosen), finalSafety(other), 'safety');
+  // What the classifier and the net decided between them. Not always what ran:
+  // a ticket that already stands takes escalation off afterwards (see the foot).
+  row('Route decided', routeText(chosen.route), routeText(other.route), 'route');
+  row('Safety decided', finalSafety(chosen), finalSafety(other), 'safety');
   row('Latency', chosen.ms ? dur(chosen.ms) : '—', other.ms ? dur(other.ms) : '—');
   row('Tokens', tokenText(chosen), tokenText(other));
   row('Cost ≈', costText(chosen), costText(other));
 
   const bases = [chosen, other].filter((r, i, all) => all.findIndex(o => o.backend === r.backend) === i)
     .map(r => NAMES[r.backend] + ': ' + r.cost_basis + '.');
+  const stood = ticketStood && (chosen.route || []).includes('escalation')
+    ? 'Escalation did not run: ticket ' + ticketStood + ' already stands for this conversation. ' : '';
   const foot = el('p', 'cmp-foot',
     'Only ' + NAMES[chosen.backend] + ' decided the route, the reply and any ticket; the other column is shown, ' +
-    'not used. Cost - ' + bases.join(' '));
+    'not used. ' + stood + 'Cost - ' + bases.join(' '));
 
   compareEl.replaceChildren(h, grid, foot);
   compareEl.hidden = false;
 
   step('compare', 'turn', NAMES[other.backend].toLowerCase() + ' · ' +
-       (other.ok ? routeText(other.route) + (diff.size ? ' · differs' : ' · agrees') : other.error),
+       (other.ok ? routeText(other.route) + ' · ' + said : other.error),
        other.ok ? 'done' : 'failed', other.ms || undefined, true);
 }
 
