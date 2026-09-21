@@ -25,13 +25,15 @@ crash.log
 override.tf
 override.tf.json
 
-# generated data - regenerate with scripts/generate_bulletins.py
+# Generated bulletins. The PDFs the live index was built from are gone, and
+# regenerating makes different ones - see the `data` target in the Makefile.
 data/synthetic_bulletins/*.pdf
 data/synthetic_bulletins/manifest.json
 
 .DS_Store
 
-# local booking/ticket store - week 3 moves this to Azure Table Storage
+# Local stores: tickets always, bookings only when BOOKING_BACKEND=file. Live
+# bookings are in Zoho Bookings (docs/decisions/008).
 data/bookings.json
 data/tickets.json
 

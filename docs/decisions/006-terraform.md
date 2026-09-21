@@ -82,6 +82,10 @@ complete and rarely is.
    *project* inside it, and that project's connection to the search service,
    are still portal steps, listed in `terraform output next_steps`.
 
+   (21 September 2026: the connection is no longer needed. The agents search
+   through a function tool the service runs, not through a Foundry connection,
+   so `next_steps` now lists only the project.)
+
    To be precise, because "the provider does not support it" is too broad:
    `azurerm_ai_foundry_project` exists, but it models the older **hub-based**
    Foundry project - a Machine Learning workspace under a hub. This project is
@@ -118,15 +122,26 @@ deploys into it. Four steps, all written down, none of them clicks.
   rather than pretended away.
 - **Managed identity for the container app, keys for the scripts.** The
   deployed service authenticates as a user-assigned identity with three role
-  assignments (pull images, call the AI account, read the search index) - no
-  long-lived secret in the running system. The ingestion scripts still use keys,
-  because they run from a laptop that has no managed identity. Honest split.
+  assignments (pull images, call the AI account, read the search index). The
+  ingestion scripts still use keys, because they run from a laptop that has no
+  managed identity.
+
+  (21 September 2026: this said "no long-lived secret in the running system",
+  and that was wrong. Managed identity covers only the Foundry agents.
+  `retrieval.py` sends `api-key` headers to Azure OpenAI, for embeddings, and to
+  AI Search - which is why `main.tf` puts both keys on the container app, and
+  why the search-reader role above goes unused by the code. In the live
+  environment those keys are in Key Vault and the app holds references
+  (decision 010); moving retrieval to managed identity is the step that would
+  make the original sentence true.)
 - **`min_replicas = 0`.** The container app scales to zero, so an idle demo
   costs nothing. The price is a cold start of a few seconds on the first request
   after a quiet period, which is the correct trade for this and the wrong one
   for a product.
-- **Random suffix on globally-unique names.** Storage account and registry names
-  are unique across all of Azure. `stautoassistdev` is almost certainly taken.
+- **Random suffix on globally-unique names.** Registry, search service and AI
+  subdomain names are unique across all of Azure. (This first named a storage
+  account; `main.tf` created one that nothing used, and it was removed on
+  21 September 2026.)
 - **`prevent_deletion_if_contains_resources`.** A `destroy` that would remove
   resources Terraform did not create fails instead.
 - **`purge_soft_delete_on_destroy` on cognitive accounts.** Soft delete reserves

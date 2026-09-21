@@ -68,8 +68,6 @@ output "env_file" {
     SEARCH_ENDPOINT=https://${azurerm_search_service.main.name}.search.windows.net
     SEARCH_API_KEY=${azurerm_search_service.main.primary_key}
     SEARCH_INDEX_NAME=service-docs
-    SEARCH_CONNECTION_NAME=
-    SEARCH_SEMANTIC=
 
     APPLICATIONINSIGHTS_CONNECTION_STRING=${azurerm_application_insights.main.connection_string}
     AZURE_LOG_LEVEL=WARNING
@@ -82,14 +80,14 @@ output "next_steps" {
 
     Infrastructure is up. Now:
 
-      1. Two portal steps Terraform cannot do (see
-         docs/decisions/006-terraform.md):
-           a. Create a project named "${var.name}" inside the AI resource
-              ai-${local.suffix}, at https://ai.azure.com
-           b. In that project: Management centre > Connected resources >
-              + New connection > Azure AI Search > srch-${local.suffix}-${random_string.unique.result}
+      1. One portal step Terraform cannot do (see
+         docs/decisions/006-terraform.md): create a project named
+         "${var.name}" inside the AI resource ai-${local.suffix}, at
+         https://ai.azure.com
       2. terraform output -raw env_file > ../.env
-      3. cd .. && make data && make reindex
+      3. cd .. && make data CONFIRM=1 && make reindex CONFIRM=1
+         Only because this search service is new and empty. Check .env
+         points at srch-${local.suffix}-${random_string.unique.result} first.
       4. python3 agents/deploy_agents.py
       5. make evals
 

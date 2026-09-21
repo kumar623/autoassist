@@ -7,11 +7,19 @@
 # Insights - already exists and is reused. This adds to your environment; it
 # changes nothing that is already there.
 #
-# Usage:
-#     ./scripts/setup_deploy_target.sh <resource-group>
+# BEFORE running it, by hand (docs/deploy.md, step 1): create the Key Vault,
+# give yourself "Key Vault Secrets Officer" on it, and add the secrets. This
+# script checks that openai-key and search-key are there, then gives the app's
+# identity "Key Vault Secrets User" on the vault and points the app at them.
+# The app never holds a key value, only the vault address of one.
 #
-# Run it from the repo root. It reads .env for the endpoints and keys, so those
-# values never have to be typed or pasted anywhere.
+# Usage:
+#     KEY_VAULT_NAME=<vault> ./scripts/setup_deploy_target.sh <resource-group>
+#
+# Optional: AI_ACCOUNT (the Foundry account; default rg-autoassist), LOCATION.
+#
+# Run it from the repo root. It reads .env for the endpoints; the keys come
+# from the vault, so they never have to be typed or pasted anywhere.
 #
 # Cost: the registry is about 400 rupees a month. The container app scales to
 # zero and costs nothing while idle.
@@ -19,8 +27,14 @@
 set -euo pipefail
 
 RG="${1:-}"
-if [ -z "$RG" ]; then
-  echo "Usage: ./scripts/setup_deploy_target.sh <resource-group>"
+KV="${KEY_VAULT_NAME:-}"
+# Named, not "the first AIServices account in the group": the resource group
+# holds more than one Foundry account, and picking the wrong one grants the
+# role somewhere the app never calls.
+AI_ACCOUNT="${AI_ACCOUNT:-rg-autoassist}"
+
+if [ -z "$RG" ] || [ -z "$KV" ]; then
+  echo "Usage: KEY_VAULT_NAME=<vault> ./scripts/setup_deploy_target.sh <resource-group>"
   echo
   echo "Your resource groups:"
   az group list --query "[].name" -o tsv | sed 's/^/  /'
@@ -38,10 +52,22 @@ set -a
 source .env
 set +a
 
-for required in PROJECT_ENDPOINT AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_KEY \
-                SEARCH_ENDPOINT SEARCH_API_KEY SEARCH_INDEX_NAME; do
+for required in PROJECT_ENDPOINT AZURE_OPENAI_ENDPOINT SEARCH_ENDPOINT SEARCH_INDEX_NAME; do
   if [ -z "${!required:-}" ]; then
     echo "$required is missing from .env" >&2
+    exit 1
+  fi
+done
+
+# The vault and its secrets come first; see the top of this file. `list` shows
+# names only - `show` would return the value.
+KV_ID=$(az keyvault show -n "$KV" --query id -o tsv)
+KV_URI=$(az keyvault show -n "$KV" --query properties.vaultUri -o tsv)
+KV_URI="${KV_URI%/}"
+HAVE=$(az keyvault secret list --vault-name "$KV" --query "[].name" -o tsv)
+for secret in openai-key search-key; do
+  if ! grep -qx "$secret" <<< "$HAVE"; then
+    echo "Key Vault $KV has no '$secret' secret. Add it first (docs/deploy.md)." >&2
     exit 1
   fi
 done
@@ -58,6 +84,8 @@ UAI="id-autoassist"
 
 echo "Resource group : $RG"
 echo "Location       : $LOCATION"
+echo "Key Vault      : $KV"
+echo "AI account     : $AI_ACCOUNT"
 echo "Registry       : $ACR"
 echo "Container app  : $APP"
 echo
@@ -96,17 +124,20 @@ az role assignment create \
   --role AcrPull --scope "$ACR_ID" -o none
 
 # Call the Foundry project as itself rather than with a key. This is what
-# DefaultAzureCredential picks up inside the container.
-AI_ID=$(az cognitiveservices account list -g "$RG" \
-          --query "[?kind=='AIServices'] | [0].id" -o tsv)
-if [ -n "$AI_ID" ]; then
-  az role assignment create \
-    --assignee-object-id "$UAI_PRINCIPAL" --assignee-principal-type ServicePrincipal \
-    --role "Cognitive Services User" --scope "$AI_ID" -o none
-  echo "    granted Cognitive Services User on the AI resource"
-else
-  echo "    WARNING: no AIServices account found in $RG - grant this by hand"
-fi
+# DefaultAzureCredential picks up inside the container. "Foundry User", not
+# "Cognitive Services User": that one covers model calls, and with it the app
+# authenticates and then gets back an EMPTY list of agents (infra/main.tf).
+AI_ID=$(az cognitiveservices account show -g "$RG" -n "$AI_ACCOUNT" --query id -o tsv)
+az role assignment create \
+  --assignee-object-id "$UAI_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+  --role "Foundry User" --scope "$AI_ID" -o none
+echo "    granted Foundry User on $AI_ACCOUNT"
+
+# Read the keys, and nothing else: not list them, not change them.
+az role assignment create \
+  --assignee-object-id "$UAI_PRINCIPAL" --assignee-principal-type ServicePrincipal \
+  --role "Key Vault Secrets User" --scope "$KV_ID" -o none
+echo "    granted Key Vault Secrets User on $KV"
 
 # Role assignments take a moment to reach the service that checks them. Creating
 # the app immediately can fail an image pull that would work a minute later.
@@ -119,8 +150,10 @@ az containerapp env create -g "$RG" -n "$CAE" --location "$LOCATION" -o none
 
 
 echo "==> Container app"
-# Secrets go in as container app secrets and are referenced by name, so they do
-# not appear in `az containerapp show` output or in the portal's env var list.
+# The app's secrets are Key Vault REFERENCES, resolved by its identity. Versionless
+# URLs, so a new version in the vault reaches the app without a deploy
+# (docs/decisions/010). The environment variables name the secrets, so no value
+# appears in `az containerapp show` or in the portal's env var list.
 az containerapp create \
   -g "$RG" -n "$APP" \
   --environment "$CAE" \
@@ -133,7 +166,9 @@ az containerapp create \
   --min-replicas 0 \
   --max-replicas 3 \
   --cpu 0.5 --memory 1Gi \
-  --secrets "openai-key=$AZURE_OPENAI_API_KEY" "search-key=$SEARCH_API_KEY" \
+  --secrets \
+      "openai-key=keyvaultref:$KV_URI/secrets/openai-key,identityref:$UAI_ID" \
+      "search-key=keyvaultref:$KV_URI/secrets/search-key,identityref:$UAI_ID" \
   --env-vars \
       "PROJECT_ENDPOINT=$PROJECT_ENDPOINT" \
       "AZURE_OPENAI_ENDPOINT=$AZURE_OPENAI_ENDPOINT" \

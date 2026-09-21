@@ -3,9 +3,10 @@
 # Everything the system needs, in one region, in one resource group.
 #
 # This describes a FRESH environment. The resources the project currently runs
-# on were created by hand in the portal; importing them into state is possible
-# but fiddly, and the point of this file is to show the environment can be
-# rebuilt from nothing. See docs/decisions/006-terraform.md.
+# on were created by hand and by scripts/setup_deploy_target.sh, not by this
+# file; importing them into state is possible but fiddly, and the point of this
+# file is to show the environment can be rebuilt from nothing. It has been
+# planned, never applied. See docs/decisions/006-terraform.md.
 #
 #   terraform init
 #   terraform plan     # read this before applying, every time
@@ -17,8 +18,8 @@ locals {
   # anything belonging to this project is obvious in a shared subscription.
   suffix = "${var.name}-${var.environment}"
 
-  # Some Azure resources reject hyphens (storage accounts, container registries)
-  # and cap at 24 characters.
+  # Container registry names allow letters and digits only, so the registry
+  # gets this hyphen-free form of the suffix.
   compact = substr(replace(local.suffix, "-", ""), 0, 20)
 
   tags = merge(
@@ -32,8 +33,9 @@ locals {
   )
 }
 
-# A random suffix on globally-unique names. Storage account and registry names
-# are unique across all of Azure, so "stautoassistdev" is very likely taken.
+# A random suffix on globally-unique names. Registry, search service and AI
+# subdomain names are unique across all of Azure, so "crautoassistdev" may well
+# be taken.
 resource "random_string" "unique" {
   length  = 5
   upper   = false
@@ -82,32 +84,6 @@ resource "azurerm_application_insights" "main" {
   retention_in_days = var.log_retention_days
 
   tags = local.tags
-}
-
-
-# ---------------------------------------------------------------- storage
-
-resource "azurerm_storage_account" "main" {
-  name                = "st${local.compact}${random_string.unique.result}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
-
-  account_tier             = "Standard"
-  account_replication_type = "LRS" # one region is enough for a demo; GRS costs double
-
-  # Defaults that are off unless you ask.
-  https_traffic_only_enabled      = true
-  min_tls_version                 = "TLS1_2"
-  allow_nested_items_to_be_public = false
-
-  tags = local.tags
-}
-
-# Raw documents. Week 3 moves the booking store here too, as a Table.
-resource "azurerm_storage_container" "documents" {
-  name                  = "documents"
-  storage_account_id    = azurerm_storage_account.main.id
-  container_access_type = "private"
 }
 
 
@@ -299,6 +275,12 @@ resource "azurerm_container_app" "orchestrator" {
 
   # Secrets are referenced by name below, so they do not appear in
   # `az containerapp show` output or in the portal's environment variable list.
+  #
+  # Here the values are stored on the app itself. The live app instead holds
+  # Key Vault references, so the values live only in the vault
+  # (docs/decisions/010-keys-in-key-vault.md). This file does not create a vault;
+  # doing so would mean a key vault, its secrets and a "Key Vault Secrets User"
+  # role for the app's identity.
   secret {
     name  = "openai-key"
     value = azurerm_cognitive_account.main.primary_access_key
@@ -344,10 +326,6 @@ resource "azurerm_container_app" "orchestrator" {
       env {
         name  = "AZURE_CLIENT_ID" # tells DefaultAzureCredential which identity to use
         value = azurerm_user_assigned_identity.app.client_id
-      }
-      env {
-        name  = "CHAT_DEPLOYMENT"
-        value = azurerm_cognitive_deployment.chat.name
       }
       env {
         name  = "EMBED_DEPLOYMENT"

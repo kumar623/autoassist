@@ -155,6 +155,10 @@ not to the index and not to the vectorizer.
 Current state: agent runs with `SEARCH_QUERY_TYPE=simple`. `search_test.py`
 still does full hybrid against the same index successfully.
 
+(Superseded in week 2 by option 3 below: the built-in tool and
+`SEARCH_QUERY_TYPE` are gone, and the agents search through
+`services/orchestrator/retrieval.py`, which `search_test.py` now also runs.)
+
 **Open decision.** Three options:
 1. Leave the agent on keyword-only. Cheap, but loses vector recall for vaguely
    worded questions — the whole reason for hybrid.
@@ -468,7 +472,9 @@ actually reach. A PDF that was never ingested cannot be cited; a document in the
 index whose file has been deleted still can. `_bulletin_ids()` now reads
 `source_file` from the index, falls back to disk, then to the manifest, and
 prints which it used. A validation check that silently degrades into rejecting
-everything is worse than no check.
+everything is worse than no check. (Since 21 September the fallback is a local
+export of the index instead, `data/index_backup/`: the PDFs and the manifest are
+gone for good.)
 
 **Over-literal expectations.** Cases demanded the exact phrase "could not find".
 The agent says "do not cover" and "found no information", both correct. Added
@@ -748,7 +754,8 @@ Routing had no ground truth. Every routing expectation lived inside a
 with a given model output — never what the model should have said in the first
 place. So "how good is triage?" had no answer.
 
-`evals/routing_set.jsonl` is 42 labelled messages: the safety cases and booking
+`evals/routing_set.jsonl` is 42 labelled messages (now 72: these 42 plus 30
+held-out cases written later - see finding 16): the safety cases and booking
 backstop cases lifted out of those tests, the two conversation cases from the
 golden set, and the live-app messages from 19-20 September. Each carries the
 **route** that should run, not triage's raw intents — `route()` forces escalation
@@ -793,7 +800,8 @@ is worth more than an impression, and because the same file is the baseline for
 the next question: whether a classifier with calibrated probabilities does better
 than a chat model asked for JSON. See `evals/compare_triage.py`.
 
-**The Jev half has not run.** TypeSafe is waitlist-only as of 20 September 2026:
+**The Jev half has not run** (since run - see finding 16). TypeSafe is
+waitlist-only as of 20 September 2026:
 `console.typesafe.ai` is a sign-in page and there is no self-service key. So
 `evals/compare_triage.py` exists, is tested, and reports the triage side — the
 numbers above came out of it — but the comparison it was written for is parked
@@ -913,4 +921,5 @@ ocean — because the client was being rebuilt per call. One shared connection:
 
 Off by default, and anything Jev cannot answer falls back to the agent. A
 classifier being down is a reason to use the model that was doing this before,
-not a reason to fail a customer's message.
+not a reason to fail a customer's message. (The live app has since been switched
+to it, through the deploy's `TRIAGE_BACKEND` variable - `docs/deploy.md`.)

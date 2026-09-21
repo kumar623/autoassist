@@ -9,6 +9,7 @@ existed, and it looked entirely plausible in the answer.
 """
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -24,6 +25,21 @@ _spec.loader.exec_module(run_evals)
 
 
 KNOWN = {"fault code list", "maintenance schedule", "p0420", "p0300", "tsb-010", "tsb-015", "brake fluid"}
+
+
+@pytest.fixture(autouse=True)
+def no_live_index(monkeypatch, tmp_path):
+    """No test here reaches the live search index or reads a local export of it.
+
+    real_sources() asks the index for its bulletin ids. Unstubbed, a test run
+    with a .env present would query the live index, and one in the main
+    checkout would read data/index_backup/. Tests that want either say so.
+    """
+    def refuse(*args, **kwargs):
+        raise RuntimeError("tests never query the live index")
+
+    monkeypatch.setattr(run_evals.retrieval, "fetch_all", refuse)
+    monkeypatch.setattr(run_evals, "INDEX_BACKUPS", tmp_path / "no-exports-here")
 
 
 # ---------------------------------------------------------------- citations
@@ -199,7 +215,8 @@ def test_all_failures_are_reported_not_just_the_first():
 
 def test_the_golden_set_is_valid():
     cases = run_evals.load_cases(None, smoke=False)
-    assert len(cases) >= 16
+    # README.md and infra/README.md quote this number; change them together.
+    assert len(cases) == 20
 
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids)), "duplicate case ids"
@@ -229,7 +246,14 @@ def test_asking_for_an_unknown_case_is_an_error():
 # ---------------------------------------------------------------- ground truth source
 
 
-def test_bulletin_ids_prefer_the_index(monkeypatch):
+def _documents():
+    return [{"source_file": f"TSB-{i:03d}.pdf"} for i in range(1, 31)] + [
+        {"source_file": "dtc_codes.csv"},
+        {"source_file": "maintenance.csv"},
+    ]
+
+
+def test_bulletin_ids_prefer_the_index(monkeypatch, tmp_path):
     """The index is what the agent can actually retrieve.
 
     The first eval run judged ten real TSB citations fabricated because the
@@ -237,40 +261,39 @@ def test_bulletin_ids_prefer_the_index(monkeypatch):
     were in the index, being correctly retrieved and correctly cited. Files on
     disk are not the ground truth; the index is.
     """
-    class FakeSearchClient:
-        def __init__(self, **kw):
-            pass
+    asked = []
 
-        def search(self, **kw):
-            return [{"source_file": f"TSB-{i:03d}.pdf"} for i in range(1, 31)] + [
-                {"source_file": "dtc_codes.csv"},
-                {"source_file": "maintenance.csv"},
-            ]
+    def fetch_all(fields, top=1000):
+        asked.append(fields)
+        return _documents()
 
-    monkeypatch.setenv("SEARCH_ENDPOINT", "https://fake")
-    monkeypatch.setenv("SEARCH_API_KEY", "k")
-    monkeypatch.setattr(
-        "azure.search.documents.SearchClient", FakeSearchClient, raising=False
-    )
+    monkeypatch.setattr(run_evals.retrieval, "fetch_all", fetch_all)
+    # An export is present too, and must not be preferred over the index.
+    monkeypatch.setattr(run_evals, "INDEX_BACKUPS", tmp_path)
+    (tmp_path / "old.json").write_text('[{"source_file": "TSB-099.pdf"}]')
 
     ids, where = run_evals._bulletin_ids()
-    assert "tsb-025" in ids
+    assert asked == [["source_file"]]
+    assert "tsb-025" in ids and "tsb-099" not in ids
     assert "dtc_codes.csv" not in ids, "csv sources are not bulletins"
     assert where == "the search index"
 
 
-def test_an_unreachable_index_falls_back_without_crashing(monkeypatch):
-    class Broken:
-        def __init__(self, **kw):
-            raise RuntimeError("index unreachable")
-
-    monkeypatch.setenv("SEARCH_ENDPOINT", "https://fake")
-    monkeypatch.setenv("SEARCH_API_KEY", "k")
-    monkeypatch.setattr("azure.search.documents.SearchClient", Broken, raising=False)
+def test_an_unreachable_index_falls_back_to_the_newest_local_export(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_evals, "INDEX_BACKUPS", tmp_path)
+    monkeypatch.setattr(run_evals, "ROOT", tmp_path)
+    (tmp_path / "service-docs-2026-09-01.json").write_text('[{"source_file": "TSB-001.pdf"}]')
+    (tmp_path / "service-docs-2026-09-19.json").write_text(json.dumps(_documents()))
 
     ids, where = run_evals._bulletin_ids()
-    assert isinstance(ids, set)
-    assert where in ("PDFs on disk", "manifest.json", "nowhere")
+    assert len(ids) == 30 and "tsb-030" in ids
+    assert "service-docs-2026-09-19.json" in where
+
+
+def test_no_index_and_no_export_says_so_rather_than_crashing():
+    ids, where = run_evals._bulletin_ids()
+    assert ids == set()
+    assert where == "nowhere"
 
 
 # ---------------------------------------------------------------- acceptable phrasings

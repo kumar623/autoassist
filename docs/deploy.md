@@ -11,7 +11,7 @@ one from a fork whose branch happens to be called `main` - never deploys.
 
 ```
 push to main
-   └─ CI: lint, 112 tests, agent definitions, Docker build   (no Azure, no cost)
+   └─ CI: lint, offline tests, agent definitions, Docker build   (no Azure, no cost)
         └─ Deploy:  build → push → update → smoke test
                                                 └─ failed? roll back, verify, fail loudly
 ```
@@ -34,82 +34,116 @@ happily reports as fine.
 
 ## One-time setup
 
-### 1. Register the app and let GitHub log in as it
+Two scripts do most of it. Each explains itself at the top; this section says
+what they are for and what is still done by hand.
+
+### 1. The keys, in Key Vault (by hand)
+
+The app's six keys live in Key Vault `kv-autoassist-kk` and the container app
+holds only references to them. Why, and what was rejected:
+`docs/decisions/010-keys-in-key-vault.md`.
+
+| Secret | The app's environment variable, and the `.env` line it comes from |
+|---|---|
+| `openai-key` | `AZURE_OPENAI_API_KEY` |
+| `search-key` | `SEARCH_API_KEY` |
+| `zoho-mcp-url` | `ZOHO_MCP_URL` |
+| `zoho-client-id` | `ZOHO_MCP_CLIENT_ID` |
+| `zoho-refresh-token` | `ZOHO_MCP_REFRESH_TOKEN` |
+| `typesafe-key` | `TYPESAFE_API_KEY` |
+
+```bash
+RG=Ai_solution
+KV=kv-autoassist-kk
+az keyvault create -g "$RG" -n "$KV" --enable-rbac-authorization true
+KV_ID=$(az keyvault show -n "$KV" --query id -o tsv)
+
+# You add and replace values. The app will only read them; GitHub gets nothing.
+az role assignment create --assignee "$(az ad signed-in-user show --query id -o tsv)" \
+  --role "Key Vault Secrets Officer" --scope "$KV_ID"
+
+# From .env, so no value is typed or pasted. -o none matters: the command's
+# output includes the value it just stored.
+set -a; source .env; set +a
+az keyvault secret set --vault-name "$KV" -n openai-key         --value "$AZURE_OPENAI_API_KEY"   -o none
+az keyvault secret set --vault-name "$KV" -n search-key         --value "$SEARCH_API_KEY"         -o none
+az keyvault secret set --vault-name "$KV" -n zoho-mcp-url       --value "$ZOHO_MCP_URL"           -o none
+az keyvault secret set --vault-name "$KV" -n zoho-client-id     --value "$ZOHO_MCP_CLIENT_ID"     -o none
+az keyvault secret set --vault-name "$KV" -n zoho-refresh-token --value "$ZOHO_MCP_REFRESH_TOKEN" -o none
+az keyvault secret set --vault-name "$KV" -n typesafe-key       --value "$TYPESAFE_API_KEY"       -o none
+```
+
+A new role assignment can take a minute to apply; if `secret set` is refused
+straight after the one above, wait and run it again.
+
+Changing a key later is a new version of the secret, not a deploy: see
+`docs/runbook.md`, "Rotating a key".
+
+### 2. Somewhere to deploy to
+
+```bash
+KEY_VAULT_NAME=kv-autoassist-kk ./scripts/setup_deploy_target.sh Ai_solution
+```
+
+Creates the container registry, the app's identity (`id-autoassist`), the
+container app environment and the container app, and builds a first image in
+Azure. It gives the identity three roles: `AcrPull` on the registry, **Foundry
+User** on the Foundry account (`rg-autoassist` by default - name it, because
+the resource group holds more than one), and **Key Vault Secrets User** on the
+vault. The app starts with references to `openai-key` and `search-key`.
+
+The three Zoho references, which the live app has because it books into Zoho
+(`BOOKING_BACKEND=zoho`), are added the same way: `az containerapp secret set`
+with `zoho-mcp-url=keyvaultref:<vault url>/secrets/zoho-mcp-url,identityref:<identity id>`,
+then `ZOHO_MCP_URL=secretref:zoho-mcp-url` among the app's environment
+variables. `typesafe-key` is referenced by the deploy itself; see "Choosing the
+triage classifier" below.
+
+### 3. Let GitHub log in as a deploy identity
+
+```bash
+./scripts/setup_github_oidc.sh Ai_solution <registry-name> ca-autoassist
+```
 
 No client secret is created. GitHub mints a short-lived token per run and Azure
 trusts it because of a *federated credential* naming this exact repo. Nothing to
 store, nothing to leak, nothing to rotate.
 
-```bash
-APP_ID=$(az ad app create --display-name autoassist-github --query appId -o tsv)
-az ad sp create --id "$APP_ID"
-SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-echo "client id: $APP_ID"
-```
+The script creates the `autoassist-github` app registration and two federated
+credentials, because GitHub's token says something different depending on how
+the job runs:
 
-Two federated credentials are needed, because GitHub's token says something
-different depending on how the job runs:
-
-```bash
-# The deploy job declares `environment: production`, which makes the subject the
-# environment rather than the branch.
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "github-production",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:kumar623/autoassist:environment:production",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-
-# CI's eval job has no environment, so its subject is the branch.
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "github-main",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:kumar623/autoassist:ref:refs/heads/main",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
+| credential | subject | used by |
+|---|---|---|
+| `github-production` | `repo:kumar623/autoassist:environment:production` | the deploy job, which declares `environment: production` |
+| `github-main` | `repo:kumar623/autoassist:ref:refs/heads/main` | the weekly evals workflow, which has no environment |
 
 A mismatched `subject` is the usual cause of `AADSTS70021: No matching
 federated identity record found`. The string must match character for character.
 
-### 2. Give it the two permissions it needs, and no more
+It then grants two roles, each scoped to one resource: `AcrPush` on the
+registry, and Contributor on the one container app - not the resource group, so
+this identity cannot touch the search service or the vault. (The live identity
+holds Container Apps Contributor on the app instead.) Either role
+includes `listSecrets` on the app, which is why no key value is kept there:
+listing now returns vault addresses.
 
-```bash
-SUB=$(az account show --query id -o tsv)
-RG=Ai_solution            # the resource group the app actually runs in
-                          # (rg-autoassist is the Foundry ACCOUNT's name, not a group)
-ACR=<your registry name>
-APP=<your container app name>
+### 4. Tell the repo where to deploy
 
-# Push images.
-az role assignment create --assignee-object-id "$SP_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role AcrPush \
-  --scope "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.ContainerRegistry/registries/$ACR"
-
-# Change one container app. Scoped to the app, not the resource group: this
-# identity cannot touch the search service, the models or the storage account.
-az role assignment create --assignee-object-id "$SP_ID" \
-  --assignee-principal-type ServicePrincipal \
-  --role Contributor \
-  --scope "/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.App/containerApps/$APP"
-```
-
-### 3. Tell the repo where to deploy
-
-Settings → Secrets and variables → Actions.
+Settings → Secrets and variables → Actions. The two scripts print these values.
 
 **Secrets** (hidden in logs):
 
 | name | value |
 |---|---|
-| `AZURE_CLIENT_ID` | the `appId` printed above |
+| `AZURE_CLIENT_ID` | the `autoassist-github` app id |
 | `AZURE_TENANT_ID` | `az account show --query tenantId -o tsv` |
 | `AZURE_SUBSCRIPTION_ID` | `az account show --query id -o tsv` |
 
 None of these are really secret — they are identifiers, not credentials, and the
 federated credential is what grants access. They are stored as secrets out of
-habit and because there is no reason to publish them.
+habit and because there is no reason to publish them. They are the only three
+things GitHub holds: no application key is stored there.
 
 **Variables** (visible, and useful in logs):
 
@@ -118,21 +152,28 @@ habit and because there is no reason to publish them.
 | `AZURE_RESOURCE_GROUP` | e.g. `Ai_solution` |
 | `AZURE_CONTAINER_APP` | e.g. `ca-autoassist` |
 | `AZURE_REGISTRY` | the login server, e.g. `crautoassist.azurecr.io` |
+| `TRIAGE_BACKEND` | optional: `agent` or `jev`; see below |
 
-### 4. For the weekly evals
+### 5. For the weekly evals
 
 `.github/workflows/evals.yml` runs real questions against the agents, so it needs
-more than the deploy does. Without these it skips with a notice rather than
-failing.
+more than the deploy does.
 
 **Variables:** `PROJECT_ENDPOINT`, `AZURE_OPENAI_ENDPOINT`, `SEARCH_ENDPOINT`
 **Secrets:** `AZURE_OPENAI_API_KEY`, `SEARCH_API_KEY`
 
-And the GitHub identity needs to list and run agents - the same role the app
+Those two secrets are no longer kept in GitHub (decision 010). The workflow's
+own check looks only for the login and the endpoint variables, so it will still
+start, and every search in it will fail on the missing keys. Until retrieval
+uses managed identity - the next step in decision 010 - run `make evals`
+locally after a prompt change.
+
+The GitHub identity also needs to list and run agents - the same role the app
 needs, on the Foundry account only:
 
 ```bash
 AI_ID=$(az cognitiveservices account show -g "$RG" -n rg-autoassist --query id -o tsv)
+SP_ID=$(az ad sp list --display-name autoassist-github --query "[0].id" -o tsv)
 az role assignment create --assignee-object-id "$SP_ID" \
   --assignee-principal-type ServicePrincipal \
   --role "Foundry User" --scope "$AI_ID"
@@ -141,7 +182,7 @@ az role assignment create --assignee-object-id "$SP_ID" \
 Name the account. The resource group holds other Foundry accounts, and taking
 "the first AIServices account in the group" can pick the wrong one.
 
-### 5. Optional: require an approval
+### 6. Optional: require an approval
 
 Settings → Environments → `production` → required reviewers. Every deploy then
 waits for a person. Nothing in the workflow file changes.
@@ -180,9 +221,10 @@ Two things were wrong with the rollback that followed, both fixed since:
   ninety seconds of the old build if something is wrong. Real zero-downtime
   would mean `Multiple` revision mode and shifting `traffic_weight` gradually,
   which is a better answer for a product and more moving parts than this needs.
-- **No database migrations.** There is no database. Bookings are a JSON file in
-  the container, which is also why they do not survive a deploy — a known
-  limitation, and the reason Table Storage is the next step.
+- **No database migrations.** There is no database. Bookings are in Zoho
+  Bookings (decision 008), so they survive a deploy. Tickets are still a JSON
+  file in the container (`TICKET_STORE`), and a deploy loses them — a known
+  limitation.
 - **No infrastructure changes.** Terraform is run by hand (`infra/README.md`).
   Deploying code and changing infrastructure on the same trigger means a bad
   application commit can delete a search index. They are kept apart on purpose.
@@ -204,21 +246,21 @@ It is a repository **variable**, so flipping it needs no code change:
 
 | value | what routes |
 |---|---|
-| `agent` (default) | the triage agent |
-| `jev` | Jev, falling back to the agent for anything it cannot answer |
+| `agent` (the default when the variable is unset) | the triage agent |
+| `jev` (what the live app runs) | Jev, falling back to the agent for anything it cannot answer |
 
-Jev also needs its key, and **every key lives on the container app**, next to the
-OpenAI, Search and Zoho ones: Container App -> Settings -> Secrets, named
-`typesafe-key`. The deploy only references it, through `secretref`, and never
-writes it. That was learned the hard way on 21 September - copying the key
-across from a GitHub secret needed the deploy identity to hold
+Jev also needs its key. The value is `typesafe-key` in Key Vault, and the app
+holds a reference to it under the same name (step 1, and decision 010). The
+deploy only references it, as `TYPESAFE_API_KEY=secretref:typesafe-key`, and
+never writes it. That was learned the hard way on 21 September - copying the
+key across from a GitHub secret needed the deploy identity to hold
 `managedEnvironments/join/action`, and after that was granted it failed on a
 further linked scope. Each step that writes a secret asks for more power for the
-identity GitHub logs in as; reading one needs nothing it does not already have.
+identity GitHub logs in as; referencing one needs nothing it does not already
+have.
 
-So GitHub holds only the three OIDC identifiers it needs to log in, none of which
-is a password. If `TRIAGE_BACKEND=jev` but the app has no `typesafe-key` secret,
-the deploy stays on the agent and says so in a warning, rather than failing.
+If `TRIAGE_BACKEND=jev` but the app has no `typesafe-key` secret, the deploy
+stays on the agent and says so in a warning, rather than failing.
 
 The change takes effect on the next deploy. To flip it immediately, without one:
 

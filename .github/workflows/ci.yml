@@ -1,8 +1,8 @@
 name: CI
 
-# Runs on every push and every pull request. Nothing here touches Azure, so it
-# needs no credentials and costs nothing - which is why it can run on every
-# commit without anyone thinking about it.
+# Runs on every push to main and every pull request into main. Nothing here
+# touches Azure, so it needs no credentials and costs nothing - which is why it
+# can run on every change without anyone thinking about it.
 
 on:
   push:
@@ -26,7 +26,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-service.txt
+          # The same constraints the Docker image installs with, so the tests run
+          # against the versions that ship. requirements.txt includes the service's.
+          pip install -c constraints.txt -r requirements.txt
 
       - name: Lint
         run: ruff check .

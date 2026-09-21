@@ -53,9 +53,9 @@ reader.
 **Tracing stays ours.** Every span in App Insights is one we chose to emit, with
 attributes we chose: `searched`, `safety_source`, `triage_parse_failed`. A
 framework brings its own instrumentation, which is useful but generic - it
-would tell us a node took 3.5s, not that triage cost 26% of the request for 44
-tokens of output. That observation came from our own spans and is what drove the
-latency work.
+would tell us a node took 3.7s, not that triage cost 18% of the request for 52
+tokens of output (`docs/evaluation.md`, "Week 3 — latency"). That observation
+came from our own spans and is what drove the latency work.
 
 **The parallelism we need is fifteen lines.** Running two independent
 specialists at once is submit-both-wait-for-both. Adopting a framework to get
@@ -87,3 +87,19 @@ This is not a judgement about LangGraph, which is good at what it does. It is a
 judgement about *this* system: a short acyclic flow where the valuable parts are
 grounding discipline and observability, and where every layer between the code
 and the model is a layer to debug through.
+
+## Revisited, 21 September 2026
+The size trigger above has fired. `router.py` is about 1,260 lines, not 200, and
+`tests/test_router.py` holds about 150 tests, of which a couple of dozen replace
+the agent call or the search with fakes through pytest's `monkeypatch` - so "no
+mocks" no longer holds either. The growth came from an answer cache, small
+talk, a fast path past triage, Jev as a second classifier, a pre-search,
+streaming, throttling, ticket carry-over and the reassurance guard; none of it
+is a cycle, a human pause or a long-running workflow, which are the other three
+triggers.
+
+The revisit is acknowledged, and the answer for now is to deduplicate the router
+rather than replace it with a framework: the flow is still acyclic and finishes
+in one request, and the safety rules are still `if` statements with tests.
+Replacing ~1,260 lines with graph configuration would move the same decisions
+further from the reader, not remove them.

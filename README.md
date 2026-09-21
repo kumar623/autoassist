@@ -19,8 +19,10 @@ registration number?
 triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9s
 ```
 
-> Week 3 of 3. Working: retrieval, four agents, parallel routing, HTTP API,
-> chat page, container, CI, App Insights tracing, automated evals (19/20).
+> Live on Azure Container Apps. Working: retrieval, four agents, routing by the
+> triage agent or by Jev, parallel specialists, a streaming chat page, bookings
+> in Zoho Bookings, keys in Key Vault, CI and a deploy with verified rollback,
+> App Insights tracing, automated evals (19/20).
 > Not yet: model-graded evaluation, authentication on /chat. See [Status](#status).
 
 ---
@@ -30,22 +32,33 @@ triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9
 ```mermaid
 flowchart LR
     U[Customer] --> API[FastAPI orchestrator]
-    API --> TRI[triage agent]
-    TRI -.JSON routing.-> API
+    API -.->|"small talk, or a question<br/>answered minutes ago"| U
+    API --> TRI{{"triage agent<br/>or Jev"}}
+    TRI -.->|"intents, safety"| API
     API --> DIAG[diagnostics]
     API --> BOOK[booking]
     API --> ESC[escalation]
+    API -.->|"pre-search"| RET
     DIAG --> RET[retrieval module]
     RET --> SEARCH[(Azure AI Search<br/>370 chunks, hybrid)]
     RET --> AOAI[Azure OpenAI<br/>embeddings]
-    BOOK --> STORE[(booking store)]
-    ESC --> STORE
+    BOOK --> ZOHO[(Zoho Bookings<br/>over MCP)]
+    ESC --> TICKETS[(ticket file)]
 ```
 
-A message goes to **triage**, which returns JSON — intents, a safety flag, any
-registration or date it spotted. The orchestrator reads that and decides which
-specialists to run, in what order. Each specialist runs in its own fresh thread
-and their answers are joined into one reply.
+Before any model runs, the orchestrator answers pleasantries itself and serves a
+first-message question it answered in the last ten minutes from an answer cache
+(plain fault-code answers only - never a booking or anything safety-flagged).
+
+Everything else goes to **triage**, which returns intents, a safety flag and any
+registration it spotted. Triage is either the triage agent writing JSON or Jev,
+a classifier returning four probabilities (`TRIAGE_BACKEND`; the live app runs
+Jev, and falls back to the agent for anything Jev cannot answer). A first
+message about a fault code, with no booking or safety words in it, skips triage
+altogether. The orchestrator reads the decision and picks the specialists; when
+diagnostics is one of them it searches the library first and hands the results
+over with the question. Independent specialists run at once, each in its own
+fresh thread, and their answers are joined into one reply.
 
 **Routing is code, not an agent calling agents.** Three reasons: every decision
 is a logged value rather than a hidden step inside a model; the routing logic is
@@ -65,14 +78,14 @@ prompt needs work, captured automatically.
 |---|---|---|
 | triage | Classify intent, flag safety. Returns JSON, never prose. | none |
 | diagnostics | Fault codes, warning lights, maintenance intervals | `search_service_docs`, `raise_ticket` |
-| booking | Find, book, cancel and confirm slots | `get_available_slots`, `book_service_slot`, `cancel_service_booking`, `look_up_booking` |
+| booking | Find, book, move, cancel and confirm slots, in Zoho Bookings | `get_available_slots`, `book_service_slot`, `move_service_booking`, `cancel_service_booking`, `look_up_booking` |
 | escalation | Hand over to a human with a written summary | `raise_ticket` |
 
 ### Retrieval
 
 Hybrid search — BM25 keyword plus vector similarity, fused by reciprocal rank
-fusion — over 370 chunks: 62 OBD-II fault codes, 28 maintenance items, and 30
-synthetic service bulletins.
+fusion — over 370 chunks: 63 OBD-II fault codes, 28 maintenance items, and 279
+chunks of 30 synthetic service bulletins.
 
 Two things sit on top of the raw search:
 
@@ -92,15 +105,16 @@ finding 5.)
 **No SDKs in the running service.** It calls Foundry, AI Search and Azure
 OpenAI directly over HTTPS: eleven requests, reproduced from the SDKs' recorded
 traffic and checked against the live system. `azure-identity` still handles
-sign-in. See [docs/decisions/007-plain-azure-apis.md](docs/decisions/007-plain-azure-apis.md).
+sign-in. The image installs only what the service imports
+(`requirements-service.txt`). See [docs/decisions/007-plain-azure-apis.md](docs/decisions/007-plain-azure-apis.md).
 
 ---
 
 ## What this is actually for
 
 The system works, but the interesting part is
-**[docs/evaluation.md](docs/evaluation.md)** — ten documented failures, what
-caused each, and what fixed it. Short version:
+**[docs/evaluation.md](docs/evaluation.md)** — sixteen numbered findings: what
+went wrong or was measured, why, and what changed. Short version:
 
 1. **The agent skipped retrieval on safety questions.** A rule that only forbids
    leaves the model to invent its own replacement behaviour.
@@ -125,9 +139,24 @@ caused each, and what fixed it. Short version:
 10. **The scorer was wrong more often than the system.** Six of the first ten
     eval failures were bugs in the eval, including checking citations against
     files on disk when the search index is the real ground truth.
+11. **A plausible wrong document beat the safety warning.** A calm bulletin
+    saying spongy brakes are normal was repeated, with a citation. Now code
+    withholds reassurance on a safety-flagged message.
+12. **A booking reference was a key to someone else's booking.** Looking up,
+    moving and cancelling now need the registration too.
+13. **A blanket safety warning on a question that was not about safety.** "Do
+    not drive" above "safe to drive with care" for P0420, and the warning in
+    the history then raised a ticket on the next turn.
+14. **Triage had never been measured.** A labelled routing set showed it
+    dropping diagnostics on safety messages.
+15. **Half of triage's mistakes were one ambiguous sentence.** "Include" read
+    as "replace"; one rewrite took routing from 45/72 to 52/72.
+16. **A classifier beat the chat model at classifying.** Jev routed 63/72
+    right against 52/72, with two safety false alarms against seven, in 352ms
+    against 2,118ms. It is now a switch, and the live app uses it.
 
-Every one of those produced a plausible-looking answer. None of them looked
-broken. They were found by checking whether the tool was actually called, what
+Almost none of them looked broken: most produced a plausible, well-written
+answer. They were found by checking whether the tool was actually called, what
 the citation pointed at, and whether the test conditions were clean.
 
 ---
@@ -151,31 +180,46 @@ reranker — see [docs/decisions/004-no-semantic-ranker.md](docs/decisions/004-n
 ### Setup
 
 ```bash
-make setup
+make setup                  # .venv with the service, the scripts and the dev tools
 source .venv/bin/activate
-cp .env.example .env        # fill in two keys
+cp .env.example .env        # fill in the endpoints and keys
 az login
-
-make data                   # generate 30 synthetic bulletins
-make reindex                # build and fill the search index
-python3 agents/deploy_agents.py
 ```
+
+The search index and the agents already exist in this environment, so that is
+all. **Do not run `make data` or `make reindex` here.** The live index is the
+only copy of the bulletins it was built from - the PDFs are gone - and
+`reindex` would delete it, while `data` writes different bulletins under the
+same names for an ingest to write over it. Both refuse unless given `CONFIRM=1`,
+which is for an empty environment only; see
+[infra/README.md](infra/README.md#never-against-the-live-index). A JSON export
+of the index's 370 documents, without vectors, is kept locally in
+`data/index_backup/` and is not committed.
+
+`python3 agents/deploy_agents.py` updates the live agents from
+`agents/definitions/`. Run it after changing a prompt, then `make evals`.
 
 ### Use it
 
 ```bash
 make serve                  # http://localhost:8000
-make test                   # 112 tests, no Azure needed
+make test                   # offline tests, no Azure needed
 make evals                  # 20 golden-set cases against the real agents
 
 python3 agents/ask.py "what does P0420 mean"
 python3 agents/ask.py "my brakes feel spongy"
-python3 scripts/search_test.py "spongy brakes" --mode keyword
+python3 scripts/search_test.py "spongy brakes" --as-agent
 ```
 
 `ask.py` prints whether the agent actually searched, every tool call with its
 timing, and the token count. A technical answer with `searched: NO` is
-ungrounded, whatever it says.
+ungrounded, whatever it says. (`ask.py` talks to one agent directly, so there is
+no pre-search: the agent has to search for itself.)
+
+`search_test.py` (`make search Q=...`) runs the service's own retrieval - relevance
+floor and per-source cap included - and prints what the diagnostics agent would
+be handed. `--as-agent` prints the tool output word for word; `--doc-type`
+narrows it to fault codes, maintenance items or bulletins.
 
 ---
 
@@ -187,21 +231,33 @@ agents/
   deploy_agents.py       idempotent create-or-update in Foundry
   ask.py                 one question, one fresh thread, full trace
 services/orchestrator/
-  app.py                 FastAPI: /chat /health /ready /metrics
-  router.py              triage parsing, routing, safety net, composition
-  runner.py              run loop: poll with timeout, execute tool calls, log
+  app.py                 FastAPI: / /chat /chat/stream /agents /library /health /ready /metrics
+  router.py              small talk, answer cache, triage, routing, safety net, pre-search, composition
+  runner.py              run loop: poll with timeout, execute tool calls, stream, log
+  foundry.py             the Foundry agent API over plain HTTPS
+  azure_http.py          retries, timeouts and readable errors for every Azure call
   retrieval.py           hybrid search, relevance floor, per-source cap
   tools.py               tool schemas and handlers
-  booking.py             slot availability, bookings, tickets
-scripts/
-  generate_bulletins.py  synthetic service bulletins as PDFs
-  ingest.py              chunk, embed, build the index
-  search_test.py         retrieval with no agent in the way
-evals/golden_set.jsonl   16 test cases, several from real regressions
+  jev_triage.py          routing by Jev's probabilities (TRIAGE_BACKEND=jev)
+  typesafe.py            the TypeSafe API that Jev answers through
+  booking.py             bookings in a local file (BOOKING_BACKEND=file), and tickets
+  zoho_bookings.py       bookings in Zoho Bookings (BOOKING_BACKEND=zoho)
+  mcp_client.py          a minimal MCP client, for Zoho's MCP server
+  zoho_auth.py           Zoho's OAuth sign-in and token refresh
+  limits.py              per-visitor rate limit and concurrency cap
+  cache.py               the time-limited cache behind answers, searches and slot lookups
+  library.py             the Library tab: every document the assistant can cite
+  roster.py              the agent panel, read from agents/definitions
+  telemetry.py           OpenTelemetry spans into Application Insights
+  static/index.html      the chat page
+scripts/                 index building, search_test.py, deploy target and GitHub login setup, Zoho sign-in and discovery
+evals/                   golden set (20 cases), routing set (72), red team, Jev comparison
+infra/                   Terraform for a fresh environment (never applied to the live one)
 docs/
-  evaluation.md          the seven findings
+  evaluation.md          the sixteen findings
+  deploy.md, runbook.md  shipping it, and running it at 2am
   decisions/             why things are the way they are
-tests/                   631 offline tests
+tests/                   offline tests: `make test`
 ```
 
 ---
@@ -220,14 +276,15 @@ used or redistributed. Every generated PDF says so on page 1.
 ## Status
 
 **Working:** ingestion and hybrid retrieval · four agents deployed from version
-controlled JSON · code-based routing with an independent safety check ·
-independent specialists run in parallel · function tools executed in-process ·
-run loop with timeouts and per-call logging · OpenTelemetry tracing into
-Application Insights · FastAPI with liveness and readiness · chat page showing
-the trace · Dockerfile · GitHub Actions CI and a deploy pipeline with a
-verified rollback · 631 offline tests · automated
-eval suite scoring 20 cases on trace facts, 19/20 passing (the one failure is
-known and written up as finding 13 in docs/evaluation.md).
+controlled JSON · code-based routing with an independent safety check, by the
+triage agent or by Jev · independent specialists run in parallel · function
+tools executed in-process · run loop with timeouts and per-call logging ·
+OpenTelemetry tracing into Application Insights · FastAPI with liveness and
+readiness · streaming chat page showing the trace · bookings in Zoho Bookings ·
+keys in Key Vault, referenced by the app · Dockerfile · GitHub Actions CI and a
+deploy pipeline with a verified rollback · offline tests (`make test`) ·
+automated eval suite scoring 20 cases on trace facts, 19/20 passing (the one
+failure is known and written up as finding 13 in docs/evaluation.md).
 
 **Not done yet:** model-graded evaluation (the scorer checks compliance, not
 quality) · authentication on `/chat` (it is rate limited, not signed in) ·
@@ -236,10 +293,12 @@ by hand and is not under its management (decision 006).
 
 **Known limitations:**
 
-- **~12s per three-agent reply** (down from 20s). Independent specialists now
-  run in parallel; see `docs/evaluation.md`. Triage is the largest remaining
-  single cost at 2.8s for ~50 tokens of JSON. Streaming the first answer while
-  the second works would cut perceived latency further.
+- **~12s per three-agent reply** (down from 20s), measured with the triage
+  agent. Independent specialists now run in parallel; see `docs/evaluation.md`.
+  The triage agent was then the largest single cost at 2.8s for ~50 tokens of
+  JSON; Jev, which routes the live app, takes about 350ms at the median. A
+  single specialist's answer is streamed as it is written; when several answer,
+  or the message is safety-flagged, the reply arrives in one piece.
 - **Conversation memory is the last six turns, kept by the page.** The server
   holds no session, so any replica can answer any message; reload the page and
   the conversation is gone. Booking and escalation see the recent turns.
@@ -260,17 +319,22 @@ by hand and is not under its management (decision 006).
   5,000–9,000 a message is roughly 12–20 messages a minute; 10,000 messages
   would take about eleven hours and cost about £30. More traffic than that needs
   more quota, not a faster service.
-- **Routing can be classified by Jev instead of a chat model**
+- **Routing is classified by Jev instead of a chat model** in the live app
   (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages: 63/72 routes right
   against the agent's 52/72, two safety false alarms against seven, 352ms
-  against 2,118ms. Off by default, falls back to the agent for anything it
-  cannot answer, and the keyword safety net still runs on top — Jev scored a
-  routine Hinglish complaint over the safety bar, and the vendor documents lower
-  non-English accuracy. See
+  against 2,118ms. Off unless the variable says so, falls back to the agent for
+  anything it cannot answer, and the keyword safety net still runs on top — Jev
+  scored a routine Hinglish complaint over the safety bar, and the vendor
+  documents lower non-English accuracy. See
   [docs/evaluation.md](docs/evaluation.md) findings 15 and 16.
 - **No reranker** on the Free search tier.
 - **The relevance floor cannot judge topic.** It measures agreement between
   search methods, not whether a document is about the right component. A clutch
   and a brake bulletin score the same. That judgement is made by the model.
+- **Two keys are still sent on every search**: `api-key` headers to Azure
+  OpenAI and AI Search. They live in Key Vault and the app holds only references
+  ([decision 010](docs/decisions/010-keys-in-key-vault.md)), but managed
+  identity covers only the Foundry agents. Managed identity for both is the
+  next step, and would remove the keys rather than store them better.
 - **The search index holds an API key** for its vectorizer. Managed identity is
   the correct fix.

@@ -8,10 +8,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-service.txt constraints.txt ./
+# Only what the service imports. requirements.txt adds the ingestion SDKs, the
+# PDF libraries and the test tools, none of which the running app touches.
+COPY requirements-service.txt constraints.txt ./
 RUN pip wheel --no-cache-dir --wheel-dir /wheels \
       -c constraints.txt \
-      -r requirements.txt -r requirements-service.txt
+      -r requirements-service.txt
 
 
 FROM python:3.12-slim AS runtime
@@ -22,24 +24,26 @@ RUN useradd --create-home --uid 10001 app
 WORKDIR /app
 
 COPY --from=build /wheels /wheels
-COPY requirements.txt requirements-service.txt constraints.txt ./
+COPY requirements-service.txt constraints.txt ./
 RUN pip install --no-cache-dir --no-index --find-links=/wheels \
       -c constraints.txt \
-      -r requirements.txt -r requirements-service.txt \
+      -r requirements-service.txt \
  && rm -rf /wheels
 
 COPY --chown=app:app services/ ./services/
-COPY --chown=app:app agents/ ./agents/
+# Only the definitions: roster.py reads them for the /agents panel. The deploy
+# and ask scripts beside them run from a laptop, never in the container.
+COPY --chown=app:app agents/definitions/ ./agents/definitions/
 
-# Writable home for the booking store. Week 3 moves that to Table Storage, at
-# which point the filesystem can be read-only.
+# Writable home for the ticket store, and for bookings when BOOKING_BACKEND=file.
+# Live bookings are in Zoho (docs/decisions/008), but tickets are still a file,
+# so the filesystem cannot be read-only yet.
 RUN mkdir -p /app/data && chown app:app /app/data
 
 USER app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000 \
     BOOKING_STORE=/app/data/bookings.json \
     TICKET_STORE=/app/data/tickets.json
 

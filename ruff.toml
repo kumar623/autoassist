@@ -1,5 +1,6 @@
 # Line length 110: these files carry a lot of explanatory comments and prompt
-# text, and wrapping at 88 made them harder to read, not easier.
+# text, and wrapping at 88 made them harder to read, not easier. Nothing fails on
+# it (E501 is ignored below, and CI and `make lint` run `ruff check` only).
 line-length = 110
 target-version = "py39"
 
@@ -13,7 +14,7 @@ select = [
     "C4",   # comprehension style
 ]
 ignore = [
-    "E501",  # line length: enforced by the formatter, not worth failing CI over
+    "E501",  # line length: a guide, not worth failing CI over (see above)
     "B008",  # function call in default arg - FastAPI depends on this pattern
     "UP007", # X | Y unions - this runs on Python 3.9 locally
     "UP045",

@@ -2,7 +2,7 @@
 
 Usage:
     python3 evals/run_evals.py                  # all cases
-    python3 evals/run_evals.py --smoke          # the 5 that matter most, for CI
+    python3 evals/run_evals.py --smoke          # the 5 that matter most (the weekly workflow)
     python3 evals/run_evals.py --only safety-01
     python3 evals/run_evals.py --workers 1      # serial, for debugging
 
@@ -16,8 +16,9 @@ What this checks, and why each check exists:
   citations_real  Does every source it cited actually exist? Finding 4 produced
                   a citation to "Corvale Brake System Safety Guidelines", a
                   document that has never existed. We check each citation
-                  against the real fault code list and the real bulletin files
-                  on disk. A made-up source fails here automatically.
+                  against the real fault code list, the maintenance items and
+                  the bulletins in the search index. A made-up source fails
+                  here automatically.
 
   contains        Phrases that must appear - "not drive" for a safety question.
   not_contains    Phrases that must not - "clutch" in a brake answer, which is
@@ -49,24 +50,33 @@ from dataclasses import dataclass, field
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
-load_dotenv()
+if __name__ == "__main__":
+    # Only when run as a script. The tests import this file, and loading .env
+    # there would put real endpoints and keys into the test process. Before the
+    # imports below, because the service modules read their settings at import.
+    load_dotenv()
 # A case answered out of an earlier case's cached reply is not a measurement of
 # anything, and two runs an hour apart would not be comparable. Set before
 # router.py reads it at import.
 os.environ["ANSWER_CACHE_SECONDS"] = "0"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from services.orchestrator import retrieval, runner  # noqa: E402
 from services.orchestrator import router as routing  # noqa: E402
-from services.orchestrator import runner  # noqa: E402
 from services.orchestrator.foundry import FoundryAgents  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "evals" / "golden_set.jsonl"
 RESULTS_DIR = ROOT / "evals" / "results"
+# Local exports of the index (documents without vectors). Not committed; see
+# infra/README.md, "Never against the live index".
+INDEX_BACKUPS = ROOT / "data" / "index_backup"
 
-# The cases CI runs on every pull request. Chosen for coverage of the failure
-# modes rather than breadth: one normal answer, two refusals that must not
-# borrow from a near-miss, the invented fault code, and prompt injection.
+# The cases `--smoke` runs: the weekly evals workflow, and a quick check after a
+# prompt change. Evals do not gate pull requests - CI gates code, the evals
+# workflow gates agents (.github/workflows/evals.yml). Chosen for coverage of
+# the failure modes rather than breadth: one normal answer, two refusals that
+# must not borrow from a near-miss, the invented fault code, and prompt injection.
 SMOKE = ["dtc-known-01", "safety-01", "unknown-01", "relevance-02", "injection-01"]
 
 # A citation looks like (fault code list, P0420) or (TSB-015, Diagnostic Procedure)
@@ -89,7 +99,7 @@ def real_sources() -> set[str]:
     machine - while those same bulletins were sitting in the index, correctly
     retrieved and correctly cited.
 
-    Falls back to disk, then to the manifest, and says which it used.
+    Falls back to a local export of the index, and says which it used.
     """
     sources: set[str] = {"fault code list", "maintenance schedule"}
 
@@ -112,43 +122,43 @@ def real_sources() -> set[str]:
 
 
 def _bulletin_ids() -> tuple[set[str], str]:
-    """Bulletin ids, preferring the index over the filesystem."""
-    # 1. the index - what was actually ingested
-    try:
-        from azure.core.credentials import AzureKeyCredential
-        from azure.search.documents import SearchClient
+    """Bulletin ids, from the index if it can be reached, else a local export.
 
-        sc = SearchClient(
-            endpoint=os.environ["SEARCH_ENDPOINT"],
-            index_name=os.getenv("SEARCH_INDEX_NAME", "service-docs"),
-            credential=AzureKeyCredential(os.environ["SEARCH_API_KEY"]),
-        )
-        ids = {
-            r["source_file"].replace(".pdf", "").lower()
-            for r in sc.search(search_text="*", select=["source_file"], top=1000)
-            if r.get("source_file")
-        }
-        ids.discard("dtc_codes.csv")
-        ids.discard("maintenance.csv")
+    The PDFs the index was built from are gone, so there is no disk to fall back
+    to: an export of the index (data/index_backup/, not committed) is the only
+    other copy.
+    """
+    # 1. the index - what the agent can actually retrieve. The same read-only
+    # query the Library tab makes.
+    try:
+        ids = _bulletins_in(retrieval.fetch_all(["source_file"]))
         if ids:
             return ids, "the search index"
     except Exception as e:  # noqa: BLE001
         print(f"  note: could not read source files from the index ({type(e).__name__})")
 
-    # 2. the PDFs on disk
-    pdf_dir = ROOT / "data" / "synthetic_bulletins"
-    ids = {p.stem.lower() for p in pdf_dir.glob("*.pdf")}
-    if ids:
-        return ids, "PDFs on disk"
+    # 2. the newest local export of the index
+    for export in sorted(INDEX_BACKUPS.glob("*.json"), reverse=True):
+        try:
+            docs = json.loads(export.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"  note: could not read {export.name} ({type(e).__name__})")
+            continue
+        ids = _bulletins_in(docs.get("value", []) if isinstance(docs, dict) else docs)
+        if ids:
+            return ids, f"{export.relative_to(ROOT)} (an export, possibly out of date)"
 
-    # 3. the manifest left behind by the generator
-    manifest = pdf_dir / "manifest.json"
-    if manifest.exists():
-        return {e["number"].lower() for e in json.loads(manifest.read_text())}, "manifest.json"
-
-    print("  WARNING: no bulletin ids from the index, disk or manifest.")
+    print("  WARNING: no bulletin ids from the index or a local export.")
     print("  Every TSB citation will be reported as fabricated, which is wrong.")
     return set(), "nowhere"
+
+
+def _bulletins_in(docs: list[dict]) -> set[str]:
+    """Bulletin ids ("tsb-015") from the documents' source_file ("TSB-015.pdf")."""
+    ids = {d["source_file"].replace(".pdf", "").lower() for d in docs if d.get("source_file")}
+    ids.discard("dtc_codes.csv")
+    ids.discard("maintenance.csv")
+    return ids
 
 
 def check_citations(answer: str, known: set[str]) -> tuple[bool, list[str]]:
@@ -225,12 +235,10 @@ def score(case: dict, turn, known: set[str]) -> CaseResult:
     answer_lower = turn.answer.lower()
 
     # 1. did it search when it should have
+    # expect_search_call false is not checked the other way: searching when it
+    # did not need to costs a little, and is not wrong.
     if case.get("expect_search_call") and not turn.searched:
         r.failures.append("no search call - this answer is ungrounded")
-    if case.get("expect_search_call") is False and turn.searched:
-        # Not a failure, just noted: searching unnecessarily costs a little but
-        # is not wrong.
-        pass
 
     # 2. did it invent a source
     ok, fabricated = check_citations(turn.answer, known)
@@ -360,7 +368,7 @@ def main() -> int:
     known = real_sources()
 
     print(f"{len(cases)} case(s), {args.workers} at a time")
-    print(f"{len(known)} known sources loaded from data/\n")
+    print(f"{len(known)} known sources (fault codes, maintenance items, bulletins)\n")
 
     started = time.time()
     results: list[CaseResult] = []

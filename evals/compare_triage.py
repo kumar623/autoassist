@@ -13,9 +13,10 @@ of the same quota the specialists need.
 
 Jev answers typed questions with calibrated probabilities instead of text. This
 script asks both the same thing about the same input and reports where they
-agree, where each one is right, and what each costs. It changes nothing: no
-module in services/orchestrator imports typesafe.py, and this script never
-touches the live app.
+agree, where each one is right, and what each costs. It changes nothing and
+never touches the live app. The service itself can route with Jev
+(TRIAGE_BACKEND=jev, services/orchestrator/jev_triage.py); this script is the
+measurement behind offering that choice.
 
 The question it is really trying to answer is not "is Jev cheaper" - it is
 whether a probability makes the safety flag better. Today the flag is a boolean
@@ -45,7 +46,11 @@ from dataclasses import dataclass, field
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 
-load_dotenv()
+if __name__ == "__main__":
+    # Only when run as a script. The tests import this file, and loading .env
+    # there would put real endpoints and keys into the test process. Before the
+    # imports below, because the service modules read their settings at import.
+    load_dotenv()
 # A cached answer measures nothing, and the router is imported below.
 os.environ["ANSWER_CACHE_SECONDS"] = "0"
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))

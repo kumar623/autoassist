@@ -150,13 +150,15 @@ jobs:
           # switched on when there is a key for it to use.
           BACKEND="${{ vars.TRIAGE_BACKEND || 'agent' }}"
           EXTRA=()
-          # Every key the app uses lives on the container app itself, as a
-          # secret, and this workflow only ever REFERENCES one - it never writes
-          # one. That is deliberate, and 21 Sep is why: copying the TypeSafe key
-          # across from GitHub needed Microsoft.App/managedEnvironments/join/action
-          # on the environment, and after that was granted it still failed on a
-          # further linked scope. Each secret-writing step asks for more power for
-          # the identity GitHub logs in as. Reading needs none it does not have.
+          # Every key the app uses lives in Key Vault, and the container app
+          # holds references to them by name (docs/decisions/010). This workflow
+          # only ever REFERENCES one of those names - it never writes a secret,
+          # and it has no access to the vault. That is deliberate, and 21 Sep is
+          # why: copying the TypeSafe key across from GitHub needed
+          # Microsoft.App/managedEnvironments/join/action on the environment, and
+          # after that was granted it still failed on a further linked scope.
+          # Each secret-writing step asks for more power for the identity GitHub
+          # logs in as. Referencing needs none it does not have.
           if [ "$BACKEND" = "jev" ]; then
             HAS_KEY=$(az containerapp show -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
                         --query "length(properties.configuration.secrets[?name=='typesafe-key'])" -o tsv)
