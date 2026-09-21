@@ -26,7 +26,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-service.txt
+          # The same constraints the Docker image installs with, so the tests run
+          # against the versions that ship. requirements.txt includes the service's.
+          pip install -c constraints.txt -r requirements.txt
 
       - name: Lint
         run: ruff check .
