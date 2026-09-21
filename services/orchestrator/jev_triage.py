@@ -8,13 +8,15 @@ answers four yes/no questions and returns a probability for each, and the policy
 changed without asking a model to behave differently.
 
 Measured on evals/routing_set.jsonl, 72 labelled messages, 21 September 2026,
-after the triage prompt was fixed:
+after the triage prompt was fixed, with the keyword backstops applied to both
+sides as production applies them (docs/evaluation.md, finding 16 - corrected on
+22 September; Jev alone, without them, is 63/72 with 2 false alarms):
 
                         triage agent      Jev
-    routes right           52/72         63/72
-    held-out only          21/30         26/30
+    routes right           52/72         57/72
+    held-out only          21/30         22/30
     safety caught          20/20         20/20
-    safety false alarms        7             2
+    safety false alarms        7             6
     latency median        2,118ms        352ms
     per 1,000 messages     $0.344        $0.056
 
@@ -31,7 +33,9 @@ a workshop in Vizag will get those. The keyword net is cheap and it does not
 care what language it is reading.
 
 Off by default. TRIAGE_BACKEND=jev turns it on; anything else uses the agent, and
-so does a message Jev could not answer.
+so does a message Jev could not answer. A visitor can also pick either one for a
+single message from the page, or ask to see both - router.plan_triage decides
+what that means on a server with or without a key.
 """
 
 from __future__ import annotations
@@ -212,7 +216,17 @@ class Classification:
 
 def configured() -> bool:
     """Whether Jev is the chosen backend AND has a key to use."""
-    return os.getenv("TRIAGE_BACKEND", "agent").strip().lower() == "jev" and typesafe.configured()
+    return os.getenv("TRIAGE_BACKEND", "agent").strip().lower() == "jev" and available()
+
+
+def available() -> bool:
+    """Whether Jev can be asked at all, whatever TRIAGE_BACKEND says.
+
+    Separate from configured() because the page lets a visitor pick Jev for one
+    message on a server whose default is the agent. That needs a key and nothing
+    else; without one the router says so rather than pretending.
+    """
+    return typesafe.configured()
 
 
 def state_for(message: str, history: list | None) -> dict:
@@ -241,22 +255,39 @@ def registration_in(message: str, history: list | None) -> str | None:
     return None
 
 
-def classify(message: str, history: list | None = None) -> Classification | None:
+def classify(message: str, history: list | None = None, *, for_routing: bool = True) -> Classification | None:
     """Ask Jev who should handle this. None means "ask the agent instead".
 
     Never raises. A classifier that is down is a reason to fall back to the
     model that was doing this before, not a reason to fail a customer's message.
+
+    `for_routing=False` is the page's side-by-side comparison, where Jev's
+    answer is only shown. It is not counted in STATS, and a failure is not
+    logged as a fallback: nothing falls back when a comparison fails, and
+    /metrics and the logs are read as what routing did. A comparison's log line
+    names the exception type only - it is one card on a page, not worth a
+    traceback or an HTTP client's text.
     """
+    def count(outcome: str) -> None:
+        if for_routing:
+            STATS[outcome] += 1
+
     started = time.time()
     try:
         answer = typesafe.ask(state_for(message, history), QUESTIONS, timeout=TIMEOUT, retries=0)
     except typesafe.TypeSafeUnavailable as e:
-        log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
-        STATS["fell_back"] += 1
+        if for_routing:
+            log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
+        else:
+            log.warning("Jev could not answer a comparison (%s)", type(e).__name__)
+        count("fell_back")
         return None
-    except Exception:  # noqa: BLE001 - a new dependency must not be able to break routing
-        log.exception("Jev classification failed unexpectedly; falling back to the triage agent")
-        STATS["fell_back"] += 1
+    except Exception as e:  # noqa: BLE001 - a new dependency must not be able to break routing
+        if for_routing:
+            log.exception("Jev classification failed unexpectedly; falling back to the triage agent")
+        else:
+            log.warning("Jev could not answer a comparison (%s)", type(e).__name__)
+        count("fell_back")
         return None
 
     answers = answer.get("answers") or {}
@@ -264,13 +295,16 @@ def classify(message: str, history: list | None = None) -> Classification | None
     for name in QUESTIONS:
         found = typesafe.probability(answers, name)
         if found is None:
-            log.warning("Jev did not answer %r; falling back to the triage agent", name)
-            STATS["fell_back"] += 1
+            if for_routing:
+                log.warning("Jev did not answer %r; falling back to the triage agent", name)
+            else:
+                log.warning("Jev did not answer %r in a comparison", name)
+            count("fell_back")
             return None
         probabilities[name] = round(found, 3)
 
     intents = [s for s in SPECIALISTS if probabilities[f"needs_{s}"] >= INTENT_CUT]
-    STATS["answered"] += 1
+    count("answered")
     return Classification(
         # "other" rather than an empty list, so TriageDecision.route() applies its
         # own rule - an unmatched message still gets a diagnostics attempt.

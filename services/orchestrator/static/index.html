@@ -14,11 +14,16 @@
     --accent: #1f5f8b;
     --safety: #b3261e;
     --safety-bg: #fdecea;
+    /* Where Jev and the LLM disagree. Amber, not the safety red: a
+       disagreement is worth seeing, not an alarm. */
+    --diff: #8a5300;
+    --diff-bg: #fff3d6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14171a; --panel: #1c2024; --ink: #e8eaed; --muted: #98a1ac;
       --line: #2c3237; --accent: #6fb3dd; --safety: #f2b8b5; --safety-bg: #3a1f1d;
+      --diff: #f1c27d; --diff-bg: #3a2f17;
     }
   }
   * { box-sizing: border-box; }
@@ -200,6 +205,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   #steps .t { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #steps .what.wrap { white-space: normal; overflow-wrap: anywhere; }
   #steps li.running .what { color: var(--accent); }
   #steps li.failed .what { color: var(--safety); }
   #steps .none { color: var(--muted); font-style: italic; }
@@ -224,6 +230,48 @@
   }
   .no-tools { color: var(--muted); font-size: 11px; margin: 5px 0 0; font-style: italic; }
   .panel-foot { color: var(--muted); font-size: 11px; margin: 8px 0 0; }
+
+  /* The triage toggle, above the message box: which classifier reads the next
+     message, and whether the other one reads it too. */
+  .triage-bar {
+    max-width: 680px; margin: 0 auto 8px; display: flex; gap: 6px 12px; flex-wrap: wrap;
+    align-items: center; font-size: 12.5px; color: var(--muted);
+  }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button {
+    background: transparent; color: var(--ink); border: 0; border-radius: 0;
+    padding: 5px 12px; font-size: 12.5px; font-weight: 550;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .seg .def { font-size: 10.5px; font-weight: 400; opacity: .8; margin-left: 5px; }
+  .compare-box { display: inline-flex; gap: 6px; align-items: center; color: var(--ink); cursor: pointer; }
+  .compare-box input { margin: 0; accent-color: var(--accent); }
+  #triage-note { flex: 1 1 220px; min-width: 0; font-size: 12px; }
+
+  /* The comparison card: the two classifiers side by side on one message. */
+  #compare-card {
+    margin: 8px 0 0; border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px 9px; background: var(--bg); font-size: 12px;
+  }
+  #compare-card h3 {
+    margin: 0 0 6px; font-size: 12.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline;
+  }
+  #compare-card .verdict { margin-left: auto; font-weight: 500; color: var(--muted); }
+  #compare-card .verdict.differs { color: var(--diff); }
+  .cmp { display: grid; grid-template-columns: minmax(78px, max-content) minmax(0, 1fr) minmax(0, 1fr); }
+  .cmp > div { padding: 4px 6px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .cmp .h { border-top: 0; font-weight: 650; display: flex; flex-direction: column; }
+  .cmp .h .role { font-weight: 400; font-size: 11px; color: var(--muted); }
+  .cmp .k { color: var(--muted); }
+  .cmp .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+  .cmp .differs { background: var(--diff-bg); color: var(--diff); }
+  .cmp .k.differs::after { content: ' ≠'; font-weight: 700; }
+  .cmp-foot { color: var(--muted); font-size: 11px; margin: 6px 0 0; }
+  @media (max-width: 420px) {
+    .cmp { grid-template-columns: minmax(64px, max-content) minmax(0, 1fr) minmax(0, 1fr); font-size: 11.5px; }
+    .cmp > div { padding: 4px 4px; }
+  }
 
   @media (max-width: 900px) {
     #main { flex-direction: column; }
@@ -264,6 +312,8 @@
   </svg>
 
   <p id="route">Nothing running. Send a message and this shows who is asked, in what order, and every tool they call.</p>
+
+  <div id="compare-card" aria-live="polite" hidden></div>
 
   <p class="panel-h">Step by step</p>
   <ul id="steps"><li><span class="none">nothing yet</span></li></ul>
@@ -306,6 +356,15 @@ Everything I say about your vehicle comes from the workshop's service documents.
 </div>
 
 <footer>
+  <div class="triage-bar">
+    <span>Triage</span>
+    <div class="seg" role="group" aria-label="Which classifier reads your message">
+      <button type="button" data-choice="jev" aria-pressed="false" title="Jev: four probabilities, thresholds in code">Jev</button>
+      <button type="button" data-choice="agent" aria-pressed="false" title="The triage agent: gpt-4.1-mini writing JSON">LLM</button>
+    </div>
+    <label class="compare-box"><input type="checkbox" id="compare"> Compare both</label>
+    <span id="triage-note"></span>
+  </div>
   <form id="f">
     <input type="text" id="q" placeholder="Describe the problem, or ask about a fault code…" autocomplete="off" autofocus>
     <button type="submit" id="send">Send</button>
@@ -371,10 +430,14 @@ const treeEl = document.getElementById('tree');
 const linksEl = document.getElementById('links');
 const boxesEl = document.getElementById('boxes');
 
+const compareEl = document.getElementById('compare-card');
+
 const parts = {};       // 'triage' | 'booking' -> {g, ms}; 'booking.get_available_slots' -> {g}
 const links = {};       // child key -> <path>
 const lines = {};       // step-list rows, keyed on what the step IS
 let tick = null, sawSafety = false;
+let compareAsked = false, compareShown = false;   // for the message in flight
+let ticketStood = null;   // a ticket that kept escalation off this message's route
 
 // el() is declared with the library code further down and hoisted to here.
 
@@ -402,11 +465,13 @@ function drawBox(key, x, y, w, name, sub, icon) {
   g.append(svg('rect', {class: 'box', x: x, y: y, width: w, height: BOX_H, rx: 9}));
   if (icon) g.append(svg('text', {class: 'icon', x: x + 11, y: y + 25}, icon));
   g.append(svg('text', {class: 'box-name', x: x + (icon ? 32 : 11), y: y + (sub ? 19 : 25)}, name));
-  if (sub) g.append(svg('text', {class: 'box-sub', x: x + (icon ? 32 : 11), y: y + 32}, sub));
+  // Kept so triage's can say which classifier routed this message.
+  const subEl = sub ? svg('text', {class: 'box-sub', x: x + (icon ? 32 : 11), y: y + 32}, sub) : null;
+  if (subEl) g.append(subEl);
   const ms = svg('text', {class: 'box-ms', x: x + w - 10, y: y + 32});
   g.append(ms);
   boxesEl.append(g);
-  parts[key] = {g, ms};
+  parts[key] = {g, ms, sub: subEl, subText: sub};
 }
 
 // A tool box has no timing of its own: the step list has the timings.
@@ -470,7 +535,10 @@ function drawTree(agents) {
   }
 }
 
-function step(who, key, what, state, ms) {
+// `wrap` lets a long line run onto a second one rather than be cut: the triage
+// line carries Jev's four numbers AND what the keyword net did, and the part
+// that would be cut is the part worth reading.
+function step(who, key, what, state, ms, wrap) {
   // Keyed on what the step IS, not on how it currently reads: an agent's line
   // says "thinking" and then "thinking · 612 tokens", and keying on the text
   // left both of them on screen.
@@ -485,6 +553,8 @@ function step(who, key, what, state, ms) {
   }
   li.className = state || '';
   li.children[1].textContent = what;
+  li.children[1].title = what;   // the line is cut to fit; hovering shows all of it
+  li.children[1].className = 'what' + (wrap ? ' wrap' : '');
   li.lastElementChild.textContent = ms === undefined ? '' : dur(ms);
 }
 
@@ -518,6 +588,11 @@ function resetPanel() {
   routeEl.textContent = 'reading your message…';
   sawSafety = false;
   mark('message', 'done');
+  compareEl.hidden = true;
+  compareEl.replaceChildren();
+  compareShown = false;
+  ticketStood = null;
+  if (parts.triage && parts.triage.sub) parts.triage.sub.textContent = parts.triage.subText;
 
   const started = Date.now();
   clearInterval(tick);
@@ -543,19 +618,42 @@ function onActivity(ev) {
       else { light(name); light(name + '>reply'); }
     }
 
+    const t = ev.triage || null;
+    const read = t && t.used !== 'none' ? t.reading : null;
     const said = [];
     if (ev.cached) said.push('Answered from the cache — no agent ran, no tokens spent.');
     else if (!running.length) said.push(ev.reason || 'Answered without an agent.');
     else said.push(running.join(' + '));
     if (ev.safety) said.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
     if (ev.ticket_stands) said.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
-    if (ev.triage_skipped) said.push('Triage skipped: a fault code and nothing else.');
+    ticketStood = ev.ticket_stands || null;
+    if (ev.triage_skipped) said.push('Triage skipped: a fault code and nothing else, so the Jev / LLM toggle does not apply.');
+    else if (read) said.push(...classifiedBy(t));
+    // Small talk and a cache hit: said whether or not "Compare both" is ticked,
+    // because the toggle is on screen either way and did nothing here.
+    else if (t && t.used === 'none') said.push('No classifier read it, so the Jev / LLM toggle does not apply.');
     else if (ev.backend) said.push(ev.backend === 'jev'
       ? 'Classified by Jev: four probabilities, thresholds in code.'
       : 'Classified by the triage agent: gpt-4.1-mini writing JSON.');
     routeEl.textContent = said.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
     step('router', 'route', running.length ? running.join(' + ') : 'answered without an agent', 'done');
+
+    if (read) {
+      // The triage line already on the list, extended with what the keyword
+      // net did to this classifier's answer - one line, not a second one.
+      step('triage', 'turn', triageLine(t), read.ok ? 'done' : 'failed', read.ms || undefined, true);
+      // Short on purpose: the box is 120px wide and its timing sits on the same
+      // line, right-aligned, from about two thirds of the way across.
+      if (parts.triage && parts.triage.sub) parts.triage.sub.textContent = 'by ' + NAMES[t.used];
+    } else if (compareAsked) {
+      compareSkipped((t && t.why) || ev.reason || 'no classifier ran');
+    }
+    return;
+  }
+
+  if (ev.kind === 'compare') {
+    drawCompare(ev);
     return;
   }
 
@@ -596,6 +694,234 @@ function onActivity(ev) {
   }
 }
 
+// ------------------------------------------------------- the triage toggle
+//
+// Which classifier reads the next message: Jev (four probabilities, thresholds
+// in code) or the LLM triage agent (gpt-4.1-mini writing JSON). Left alone, the
+// page sends "auto" and the server's own TRIAGE_BACKEND decides, exactly as it
+// did before there was a toggle; the lit segment is the one the server uses.
+// Picking the other one applies to your messages only. "Compare both" also has
+// the one not picked read the message, beside the answer, for the card in the
+// panel. It changes nothing about the reply.
+//
+// Remembered with localStorage, which can be blocked or throw. Every read and
+// write is wrapped, and the page works the same without it.
+const NAMES = {jev: 'Jev', agent: 'LLM'};
+const triageButtons = document.querySelectorAll('.seg button');
+const compareBox = document.getElementById('compare');
+const triageNote = document.getElementById('triage-note');
+let serverTriage = null;      // what "auto" means here, from /agents
+let jevAvailable = true;      // whether the server has a TypeSafe key
+let triageChoice = remembered('autoassist.triage', 'auto');
+if (!['auto', 'jev', 'agent'].includes(triageChoice)) triageChoice = 'auto';
+compareBox.checked = remembered('autoassist.compare', '0') === '1';
+
+function remembered(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+}
+function remember(key, value) {
+  try { localStorage.setItem(key, value); } catch (e) { /* blocked: the choice lasts this visit */ }
+}
+
+function drawToggle() {
+  const lit = triageChoice === 'auto' ? serverTriage : triageChoice;
+  triageButtons.forEach(b => {
+    const choice = b.dataset.choice;
+    b.setAttribute('aria-pressed', String(choice === lit));
+    b.replaceChildren(document.createTextNode(NAMES[choice]));
+    if (choice === 'jev' && !jevAvailable) b.append(el('span', 'def', 'no key'));
+    else if (choice === serverTriage) b.append(el('span', 'def', 'default'));
+  });
+  let note = '';
+  if (lit === 'jev' && !jevAvailable) note = 'No TypeSafe key on this server: the LLM will read it, and say so.';
+  // Without a key there is no other one to read it: every card would say so.
+  else if (compareBox.checked && !jevAvailable) note = 'No TypeSafe key on this server: Jev cannot be compared.';
+  else if (compareBox.checked) note = 'The other one reads each message too, for the panel only.';
+  else if (triageChoice !== 'auto' && serverTriage) note = 'Just for your messages; the server default is ' + NAMES[serverTriage] + '.';
+  triageNote.textContent = note;
+}
+
+triageButtons.forEach(b => b.addEventListener('click', () => {
+  // Picking what the server already uses is the same as not picking: the same
+  // classifier and the same cached answers. Sending "auto" for it keeps
+  // /metrics honest about how often anyone chose.
+  triageChoice = b.dataset.choice === serverTriage ? 'auto' : b.dataset.choice;
+  remember('autoassist.triage', triageChoice);
+  drawToggle();
+}));
+compareBox.addEventListener('change', () => {
+  remember('autoassist.compare', compareBox.checked ? '1' : '0');
+  drawToggle();
+});
+drawToggle();
+
+// ------------------------------------------------------- the comparison card
+//
+// Every figure here is the router's own (router._reading): what the classifier
+// said by itself, what the keyword net matched and added, what was finally
+// decided, and what it cost. Nothing is worked out again in the page, so the
+// card cannot disagree with the trace.
+
+function routeText(route) { return route && route.length ? route.join(' + ') : '—'; }
+function yesNo(v) { return v === true ? 'yes' : v === false ? 'no' : '—'; }
+function scores(p) {
+  return Object.keys(p || {}).map(k => k.replace('needs_', '') + ' ' + p[k].toFixed(2)).join('  ');
+}
+
+// The LLM's answer as the router parsed it, not as the model wrote it: parsing
+// drops an intent it does not know and turns an empty list into "other". Not
+// dressed up as JSON, so it is not mistaken for the model's own text.
+function ownAnswer(r) {
+  if (!r.ok) return 'did not answer: ' + r.error;
+  if (r.backend === 'jev') return scores(r.probabilities);
+  return 'intents ' + (r.own_intents || []).join(', ') + ' · safety ' + yesNo(r.own_safety);
+}
+
+// Two places, like every other score on the card - unless rounding would carry
+// the figure across Jev's bar, and "0.70 < 0.7" would read as a contradiction.
+// Then three, which is what the router keeps.
+function against(p, cut) {
+  const two = p.toFixed(2);
+  return (Number(two) >= cut) === (p >= cut) ? two : p.toFixed(3);
+}
+
+function ownSafety(r) {
+  if (!r.ok) return '—';
+  const p = r.probabilities && r.probabilities.safety;
+  if (typeof p !== 'number') return yesNo(r.own_safety);
+  const c = r.safety_cut;
+  if (typeof c !== 'number') return yesNo(r.own_safety) + ' (' + p.toFixed(2) + ')';
+  return yesNo(r.own_safety) + ' (' + against(p, c) + (p >= c ? ' ≥ ' : ' < ') + c + ')';
+}
+
+// What the keyword net matched in the message, and what that added to this
+// classifier's answer. The words are the same for both - it is one regex over
+// one message - but what they changed depends on what each classifier said.
+function netSaid(r) {
+  if (!r.route) return '—';   // nothing ran through the net: the classifier never answered
+  const words = [r.keyword_match, r.booking_match].filter(Boolean).map(w => '“' + w + '”');
+  if (!words.length) return 'no match';
+  const added = r.keyword_added || [];
+  if (added.length) return words.join(', ') + ' → added ' + added.join(' + ');
+  return words.join(', ') + (r.ok ? ' → no change' : '');
+}
+
+function finalSafety(r) {
+  if (r.safety === null || r.safety === undefined) return '—';
+  return r.safety ? 'yes (' + r.safety_source + ')' : 'no';
+}
+
+function tokenText(r) {
+  if (!r.tokens) return '—';
+  if (r.backend === 'jev') return r.tokens.toLocaleString() + ' input';
+  return r.prompt_tokens.toLocaleString() + ' in + ' + r.completion_tokens.toLocaleString() + ' out';
+}
+
+function costText(r) {
+  if (!r.tokens) return '—';
+  return '$' + r.cost_usd.toFixed(6) + ' · $' + (r.cost_usd * 1000).toFixed(3) + ' per 1,000';
+}
+
+function triageLine(t) {
+  const r = t.reading;
+  let s = NAMES[t.used].toLowerCase();
+  if (t.requested !== 'auto' && t.requested !== t.used) s += ' (asked for ' + NAMES[t.requested] + ')';
+  if (!r.ok) return s + ' · ' + r.error + ' · keywords decided';
+  s += ' · ' + (r.backend === 'jev' ? scores(r.probabilities)
+                                     : routeText(r.own_route) + ' · safety ' + yesNo(r.own_safety));
+  if ((r.keyword_added || []).length) s += ' · net ' + netSaid(r);
+  if (r.backend !== 'jev' && r.tokens) s += ' · ' + r.tokens + ' tokens';
+  return s;
+}
+
+// The route line's sentences about who classified the message.
+function classifiedBy(t) {
+  const r = t.reading;
+  const said = [];
+  if (t.why) said.push(t.requested === 'jev'
+    ? 'You picked Jev, but ' + t.why + ', so the LLM read it.'
+    : t.why + ', so the LLM read it.');
+  said.push(t.used === 'jev'
+    ? 'Classified by Jev: four probabilities, thresholds in code.'
+    : 'Classified by the triage agent (LLM): gpt-4.1-mini writing JSON.');
+  if (!r.ok) said.push(NAMES[t.used] + ' did not answer (' + r.error + '); the keyword fallback routed it.');
+  else if ((r.keyword_added || []).length) said.push('The keyword net overruled ' + NAMES[r.backend] + ': ' + netSaid(r) + '.');
+  return said;
+}
+
+function compareHead(r, decided) {
+  const d = el('div', 'h');
+  const role = decided ? (r.ok ? 'decided the route' : 'chosen; the keywords decided')
+                       : (r.ok ? 'compared only' : 'did not answer');
+  d.append(el('span', null, NAMES[r.backend] || r.backend), el('span', 'role', role));
+  return d;
+}
+
+// One verdict for the card's heading and for the step list, so the two cannot
+// disagree. There is only something to agree about when both answered: the
+// router reports no differences otherwise, and that is not agreement.
+function verdictOf(chosen, other, diff) {
+  if (!chosen.ok && !other.ok) return 'neither answered';
+  if (!chosen.ok || !other.ok) return 'only one answered';
+  return diff.size ? 'they differ' : 'they agree';
+}
+
+function drawCompare(c) {
+  const chosen = c.chosen, other = c.other;
+  if (!chosen || !other) return;
+  compareShown = true;
+  const diff = new Set(c.differences || []);
+  const said = verdictOf(chosen, other, diff);
+
+  const h = el('h3', null, NAMES[chosen.backend] + ' vs ' + NAMES[other.backend] + ' on this message');
+  const verdict = el('span', 'verdict', said);
+  if (said === 'they differ') verdict.classList.add('differs');
+  h.append(verdict);
+
+  const grid = el('div', 'cmp');
+  grid.append(el('div', 'h', ''), compareHead(chosen, true), compareHead(other, false));
+  const row = (label, a, b, key, mono) => {
+    const cls = key && diff.has(key) ? ' differs' : '';
+    const val = 'v' + cls + (mono ? ' mono' : '');
+    grid.append(el('div', 'k' + cls, label), el('div', val, a), el('div', val, b));
+  };
+  row('Its own route', routeText(chosen.own_route), routeText(other.own_route), 'own_route');
+  row('Its safety call', ownSafety(chosen), ownSafety(other), 'own_safety');
+  // No longer than the other labels: this column takes its width from the longest.
+  row('Parsed answer', ownAnswer(chosen), ownAnswer(other), null, true);
+  row('Keyword net', netSaid(chosen), netSaid(other));
+  // What the classifier and the net decided between them. Not always what ran:
+  // a ticket that already stands takes escalation off afterwards (see the foot).
+  row('Route decided', routeText(chosen.route), routeText(other.route), 'route');
+  row('Safety decided', finalSafety(chosen), finalSafety(other), 'safety');
+  row('Latency', chosen.ms ? dur(chosen.ms) : '—', other.ms ? dur(other.ms) : '—');
+  row('Tokens', tokenText(chosen), tokenText(other));
+  row('Cost ≈', costText(chosen), costText(other));
+
+  const bases = [chosen, other].filter((r, i, all) => all.findIndex(o => o.backend === r.backend) === i)
+    .map(r => NAMES[r.backend] + ': ' + r.cost_basis + '.');
+  const stood = ticketStood && (chosen.route || []).includes('escalation')
+    ? 'Escalation did not run: ticket ' + ticketStood + ' already stands for this conversation. ' : '';
+  const foot = el('p', 'cmp-foot',
+    'Only ' + NAMES[chosen.backend] + ' decided the route, the reply and any ticket; the other column is shown, ' +
+    'not used. ' + stood + 'Cost - ' + bases.join(' '));
+
+  compareEl.replaceChildren(h, grid, foot);
+  compareEl.hidden = false;
+
+  step('compare', 'turn', NAMES[other.backend].toLowerCase() + ' · ' +
+       (other.ok ? routeText(other.route) + ' · ' + said : other.error),
+       other.ok ? 'done' : 'failed', other.ms || undefined, true);
+}
+
+function compareSkipped(why) {
+  compareEl.replaceChildren(
+    el('h3', null, 'Nothing to compare'),
+    el('p', 'cmp-foot', 'No classifier read this message (' + why + '), so the Jev / LLM toggle did not apply.'));
+  compareEl.hidden = false;
+  compareShown = true;
+}
+
 function drawAgentReference(agents) {
   agentListEl.replaceChildren();
   for (const a of agents) {
@@ -633,6 +959,9 @@ fetch('/agents')
     drawAgentReference(j.agents || []);
     agentsFootEl.textContent =
       'Routing is decided in code, not by an agent calling other agents, so every step above is a value the service logged.';
+    serverTriage = j.triage_backend === 'jev' ? 'jev' : 'agent';
+    jevAvailable = j.jev_available !== false;
+    drawToggle();
   })
   .catch(() => { agentListEl.replaceChildren(el('p', 'hint', 'Could not load the agents.')); });
 
@@ -675,6 +1004,21 @@ function meta(col, data) {
     m.appendChild(w);
   }
 
+  // Which classifier routed this reply, so a conversation read back later
+  // still shows where each answer's route came from.
+  const tri = data.triage;
+  if (tri && tri.used && tri.used !== 'none') {
+    m.appendChild(tag('triage: ' + NAMES[tri.used] + (tri.why ? ' — ' + tri.why : '')));
+  }
+  const cmp = data.comparison;
+  if (cmp && cmp.chosen && cmp.other && cmp.chosen.ok && cmp.other.ok) {
+    const pair = NAMES[cmp.chosen.backend] + ' and ' + NAMES[cmp.other.backend];
+    const d = (cmp.differences || []).length;
+    const agreed = tag(d ? pair + ' differ' : pair + ' agree');
+    if (d) agreed.style.color = 'var(--diff)';
+    m.appendChild(agreed);
+  }
+
   const t = document.createElement('span');
   t.textContent = `${data.tokens} tokens · ${(data.ms / 1000).toFixed(1)}s`;
   m.appendChild(t);
@@ -706,6 +1050,7 @@ async function askServer(text) {
   let streamed = '';
   let done = null;
   const startedAt = resetPanel();
+  compareAsked = compareBox.checked;
 
   try {
     // The answer arrives as it is written. A specialist takes 5-8s to write one,
@@ -714,7 +1059,8 @@ async function askServer(text) {
     const r = await fetch('/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT)})
+      body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT),
+                            triage: triageChoice, compare: compareAsked})
     });
     if (!r.ok || !r.body) {
       const err = await r.json().catch(() => ({detail: r.statusText}));
@@ -767,6 +1113,9 @@ async function askServer(text) {
       if (done.safety) bubble.classList.add('safety');
       history.push({role: 'customer', text}, {role: 'assistant', text: done.reply || streamed});
       meta(col, done);
+      // The compare event normally drew the card already; the final answer
+      // carries the same data, in case that event was lost on the way.
+      if (done.comparison && !compareShown) drawCompare(done.comparison);
     } else if (!streamed) {
       bubble.textContent = 'Something went wrong: the answer did not arrive.';
     }

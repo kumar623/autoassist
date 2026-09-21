@@ -72,6 +72,44 @@ a regex checks the raw text independently. Either firing is enough. When the
 regex catches something triage missed, it logs a warning — a signal the triage
 prompt needs work, captured automatically.
 
+### Jev or the LLM, side by side
+
+Above the message box on the chat page is **Triage: Jev | LLM** and **Compare
+both**.
+
+- **Left alone**, the page sends `auto` and the server's `TRIAGE_BACKEND`
+  decides, exactly as before; the lit segment, marked *default*, is that one.
+- **Pick the other one** and it classifies your messages only. The choice is
+  remembered in your browser. Jev needs a TypeSafe key on the server: without
+  one, picking Jev gets the LLM, and the panel, the step list and the reply's
+  tags all say so rather than showing the LLM's route under Jev's name.
+- **Compare both** has the other classifier read the same message too, beside
+  the answer. A card in the panel puts the two side by side: each one's own
+  route and safety call (Jev's four probabilities, the LLM's intents as parsed
+  from its JSON), what the keyword net matched and what it added, the route
+  decided, latency, tokens, and cost at the prices the routing eval uses
+  (finding 16). Rows where they disagree are highlighted, before the keyword net
+  and after it. When Jev was picked and cannot answer, the LLM routes the
+  message and the card shows Jev as not answering: the LLM is never compared
+  with itself, and its triage turn is paid for once.
+
+Try **Brake fluid interval**. Jev reads it as a maintenance question and scores
+it low on safety; the keyword net sees "brake" and escalates it anyway. The card
+shows both halves of that — which is the argument for keeping the net.
+
+The comparison is display only. The route, the reply, any ticket and the answer
+cache follow the classifier that routed the message; a compare request neither
+reads nor fills the cache, and its tokens are counted apart, per classifier
+(`compare_tokens_jev` and `compare_tokens_agent` in `/metrics`), not in the
+answer's. If the other classifier fails or is still running when the answer is
+ready, the card says so and the answer is unaffected. Small talk, a bare fault
+code and a cached answer involve no classifier, so the toggle does not apply to
+them and the panel says that instead.
+
+The same is available without the page: `POST /chat` with `"triage": "jev"`
+(or `"agent"`, or `"auto"`) and `"compare": true`; the response carries
+`triage` (what was asked for, what was used and why) and `comparison`.
+
 ### The agents
 
 | Agent | Job | Tools |
@@ -151,9 +189,12 @@ went wrong or was measured, why, and what changed. Short version:
     dropping diagnostics on safety messages.
 15. **Half of triage's mistakes were one ambiguous sentence.** "Include" read
     as "replace"; one rewrite took routing from 45/72 to 52/72.
-16. **A classifier beat the chat model at classifying.** Jev routed 63/72
-    right against 52/72, with two safety false alarms against seven, in 352ms
-    against 2,118ms. It is now a switch, and the live app uses it.
+16. **A classifier beat the chat model at classifying - by less than first
+    reported.** With the keyword backstops applied to both, as production does,
+    Jev routed 57/72 right against 52/72, with six safety false alarms against
+    seven, in 352ms against 2,118ms, at a sixth of the cost. The first table
+    left the backstops off Jev's side only and said 63/72 and two. It is now a
+    switch, the live app uses it, and the page can show both side by side.
 
 Almost none of them looked broken: most produced a plausible, well-written
 answer. They were found by checking whether the tool was actually called, what
@@ -320,9 +361,10 @@ by hand and is not under its management (decision 006).
   would take about eleven hours and cost about £30. More traffic than that needs
   more quota, not a faster service.
 - **Routing is classified by Jev instead of a chat model** in the live app
-  (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages: 63/72 routes right
-  against the agent's 52/72, two safety false alarms against seven, 352ms
-  against 2,118ms. Off unless the variable says so, falls back to the agent for
+  (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages, with the keyword
+  backstops on both sides as production runs them: 57/72 routes right against
+  the agent's 52/72, six safety false alarms against seven, 352ms against
+  2,118ms. Off unless the variable says so, falls back to the agent for
   anything it cannot answer, and the keyword safety net still runs on top — Jev
   scored a routine Hinglish complaint over the safety bar, and the vendor
   documents lower non-English accuracy. See

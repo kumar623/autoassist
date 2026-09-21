@@ -108,6 +108,38 @@ On the Jev path the span also carries `backend = jev` and each probability
 (`p_safety`, `p_needs_diagnostics`, ...), so a false alarm can be read as a
 number rather than a guess.
 
+Every path also records `triage_choice` (`auto`, `jev` or `agent` - the page's
+toggle), `triage_fallback` when the classifier asked for could not be used (no
+TypeSafe key, or Jev did not answer), the classifier's own `classifier_safety`
+before the regex, and `keyword_match`, the word the regex caught. When a visitor
+ticks "Compare both", the other classifier's reading goes in a separate
+`routing.compare` span (`chosen`, `other`, `agrees`, `differences`), never in
+`routing.decision`, so the counts above are still one per message. `chosen` and
+`other` are never the same classifier: when Jev was chosen and could not answer,
+the agent routes and `other` is Jev, not answering, rather than a second agent
+turn. `agrees` is only set when both answered. How often do the two disagree,
+and on what?
+
+```kql
+dependencies
+| where timestamp > ago(7d)
+| where name == "routing.compare"
+| where isnotempty(customDimensions["autoassist.agrees"])   // both answered
+| summarize compared = count(), disagreed = countif(tobool(customDimensions["autoassist.agrees"]) == false)
+  by differences = tostring(customDimensions["autoassist.differences"])
+```
+
+`/metrics` counts the toggle: `triage_choice_jev`, `triage_choice_agent`,
+`triage_compare`, and what the compared classifier spent, per classifier:
+`compare_tokens_jev` (input tokens) and `compare_tokens_agent` (prompt plus
+completion). Two figures, not one, because they are priced about ten times apart
+(`PRICE_PER_MTOK` in the router). Each comparison is counted when it finishes,
+so one still running when its answer went - billed all the same - is in them
+too. They are kept out of `total_tokens`, which is what the answers cost. A
+compared Jev call is not counted in `jev_answered` or `jev_fell_back`, and a
+compared Jev that fails is not logged as a fallback: those stay a record of what
+routing did.
+
 ---
 
 ### Answers withheld on a safety issue

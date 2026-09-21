@@ -56,6 +56,9 @@ class Result:
     throttled = False
     retry_after = 0
     error = None
+    triage = None
+    comparison = None
+    comparison_tokens = 0
 
     def trace(self):
         return []

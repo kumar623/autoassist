@@ -3,6 +3,7 @@
 Endpoints:
     GET  /            the chat page
     POST /chat        {"message": "...", "history": [...]} -> {"reply": "...", "trace": [...]}
+                      optionally "triage": "auto"|"jev"|"agent" and "compare": true
     POST /chat/stream same, but the answer arrives as it is written (SSE)
     GET  /agents      the four agents, their tools, and where each tool call goes
     GET  /library     every document the assistant can cite, from the index
@@ -28,7 +29,7 @@ import queue
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Literal, Optional
 
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
@@ -90,6 +91,11 @@ METRICS = {
     "refused": 0,       # rate limited or too many at once, never reached an agent
     "throttled": 0,     # Azure had no quota left
     "cache_hits": 0,    # answered from an identical earlier question
+    # The page's triage toggle: how often a visitor picked a classifier rather
+    # than taking the server's default, and how often they asked to see both.
+    "triage_choice_jev": 0,
+    "triage_choice_agent": 0,
+    "triage_compare": 0,
 }
 
 # /chat and /chat/stream are public. LIMITS is what stops one visitor - or one
@@ -141,6 +147,13 @@ class ChatRequest(BaseModel):
     # only the most recent routing.MAX_HISTORY_TURNS; the cap here just keeps
     # request bodies bounded.
     history: list[HistoryTurn] = Field(default_factory=list, max_length=20)
+    # Which classifier reads this message. "auto" is whatever TRIAGE_BACKEND
+    # says, and is what every existing caller gets without asking; "jev" and
+    # "agent" are the page's toggle. See router.plan_triage.
+    triage: Literal["auto", "jev", "agent"] = "auto"
+    # Also run the other classifier on the same message and report what it made
+    # of it. Display only: the route, the reply and the tickets do not change.
+    compare: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -157,6 +170,12 @@ class ChatResponse(BaseModel):
     # that apart from an ordinary answer without reading the text.
     throttled: bool = False
     retry_after: int = 0
+    # The triage choice as asked for and as it happened: {"requested", "used",
+    # "why", "reading"}. "used" is "none" when no classifier read the message.
+    triage: Optional[dict] = None
+    # The other classifier's reading, when `compare` was asked for:
+    # {"chosen", "other", "differences"}.
+    comparison: Optional[dict] = None
 
 
 @app.get("/health")
@@ -198,6 +217,13 @@ def metrics() -> dict:
     m["triage_backend"] = roster.triage_backend()
     m["jev_answered"] = jev_triage.STATS["answered"]
     m["jev_fell_back"] = jev_triage.STATS["fell_back"]
+    # Spent on the compared classifier, which answers nobody. Not in
+    # total_tokens - that is what the answers cost - but not hidden either. One
+    # figure per classifier, because their tokens are priced about ten times
+    # apart, and counted as each comparison finishes, so one that outlived its
+    # answer is in it too.
+    m["compare_tokens_jev"] = routing.COMPARE_SPENT["jev"]
+    m["compare_tokens_agent"] = routing.COMPARE_SPENT["agent"]
     return m
 
 
@@ -236,6 +262,7 @@ def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     _admit(request)
     METRICS["requests"] += 1
+    _count_choice(req)
     started = time.time()
 
     try:
@@ -245,6 +272,8 @@ def chat(req: ChatRequest, request: Request) -> ChatResponse:
             timeout=REQUEST_TIMEOUT,
             agent_ids=STATE["agent_ids"],
             history=[h.model_dump() for h in req.history],
+            triage=req.triage,
+            compare=req.compare,
         )
     except Exception as e:  # noqa: BLE001
         METRICS["failures"] += 1
@@ -254,6 +283,18 @@ def chat(req: ChatRequest, request: Request) -> ChatResponse:
         LIMITS.release()
 
     return _chat_response(result, started)
+
+
+def _count_choice(req: ChatRequest) -> None:
+    """Count the page's triage toggle, for /metrics. Used by both endpoints.
+
+    Counted on the request, not on what happened: a visitor who picks Jev on a
+    server with no key has still picked Jev, and the reply says what answered.
+    """
+    if req.triage != "auto":
+        METRICS[f"triage_choice_{req.triage}"] += 1
+    if req.compare:
+        METRICS["triage_compare"] += 1
 
 
 def _chat_response(result, started: float) -> ChatResponse:
@@ -286,6 +327,8 @@ def _chat_response(result, started: float) -> ChatResponse:
         cached=result.cached,
         throttled=result.throttled,
         retry_after=result.retry_after,
+        triage=result.triage,
+        comparison=result.comparison,
     )
 
 
@@ -297,7 +340,8 @@ def chat_stream(req: ChatRequest, request: Request):
     anything is most of what makes the app feel slow. The events:
 
         {"type": "status", "text": "..."}  what is happening while they wait
-        {"type": "activity", "kind": ...}  for the agent panel: route, agent, tool
+        {"type": "activity", "kind": ...}  for the agent panel: route, agent, tool,
+                                           and compare when both classifiers were asked
         {"type": "delta", "text": "..."}   a fragment of the answer
         {"type": "done",  ...}             the whole ChatResponse, with the trace
         {"type": "error", "detail": "..."}
@@ -315,6 +359,7 @@ def chat_stream(req: ChatRequest, request: Request):
     # released there rather than here.
     _admit(request)
     METRICS["requests"] += 1
+    _count_choice(req)
     started = time.time()
     fragments: queue.Queue = queue.Queue()
     DONE = object()
@@ -323,7 +368,7 @@ def chat_stream(req: ChatRequest, request: Request):
         try:
             result = routing.handle(
                 client, req.message.strip(), timeout=REQUEST_TIMEOUT, agent_ids=STATE["agent_ids"],
-                history=[h.model_dump() for h in req.history],
+                history=[h.model_dump() for h in req.history], triage=req.triage, compare=req.compare,
                 on_delta=fragments.put, on_status=lambda text: fragments.put(("status", text)),
                 # Called from inside the agent threads, several at once when the
                 # specialists run in parallel. Queue.put is what makes that safe.

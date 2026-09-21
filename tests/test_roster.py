@@ -78,7 +78,7 @@ def test_an_agent_that_is_not_deployed_is_shown_as_such():
 def test_a_missing_definition_file_does_not_break_the_page(monkeypatch, tmp_path):
     monkeypatch.setattr(roster, "DEFINITIONS", tmp_path)
     roster._ROSTER.clear()
-    assert roster.load() == {"agents": [], "triage_backend": "agent"}
+    assert roster.load() == {"agents": [], "triage_backend": "agent", "jev_available": False}
 
 
 def test_a_broken_definition_file_is_skipped(monkeypatch, tmp_path):

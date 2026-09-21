@@ -872,12 +872,23 @@ prompt fix above, so the comparison is against triage at its best:
 
 | | triage agent | Jev |
 |---|---|---|
-| Routes right | 52/72 | **63/72** |
-| — held-out only | 21/30 | **26/30** |
+| Routes right | 52/72 | **57/72** |
+| — held-out only | 21/30 | **22/30** |
 | Safety caught | 20/20 | 20/20 |
-| Safety false alarms | 7 | **2** |
+| Safety false alarms | 7 | **6** |
 | Latency, median | 2,118ms | **352ms** |
 | Per 1,000 messages | $0.344 | **$0.056** |
+
+**Corrected 22 September.** This table first said 63/72, 26/30 and 2 false
+alarms for Jev. Those numbers were Jev on its own; the agent's column already
+included the keyword backstops, because it was scored through `parse_triage`.
+Production runs both backstops on both paths, so the fair comparison includes
+them on both sides - which is the table above. Jev without the backstops is
+still 20/20 with 2 false alarms; the four the backstops add are all the word
+"brake" in a message that is not a fault ("how often should brake fluid be
+changed", "the brakes are fine, it is the air conditioning"), which Jev itself
+scored between 0.04 and 0.14. It is the same mistake as the three below:
+measuring one side differently flattered it.
 
 Four mistakes were made getting there, and each one flattered the wrong side:
 
