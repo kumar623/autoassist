@@ -144,9 +144,10 @@ def test_a_run_that_never_finishes_is_cancelled_at_the_timeout():
     assert c.cancelled
 
 
-def test_an_endless_tool_loop_is_stopped_and_cancelled():
+def test_an_endless_tool_loop_is_stopped_and_cancelled(monkeypatch):
+    monkeypatch.setattr(runner, "MAX_TOOL_ROUNDS", 3)
     c = FakeFoundry([wants_tools(("get_available_slots", "{}"))])
-    t = runner.run_turn(c, "asst_1", "thread_1", max_tool_rounds=3)
+    t = runner.ask(c, "asst_1", "q")
     assert "3 rounds" in t.error
     assert c.cancelled
     assert len(c.submitted) == 3
@@ -262,3 +263,20 @@ def test_a_stream_that_stops_early_is_not_reported_as_success():
     t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
     assert not t.ok
     assert "did not finish" in t.error or "without finishing" in t.error
+
+
+def test_an_endless_tool_loop_while_streaming_stops_at_the_same_limit(monkeypatch):
+    monkeypatch.setattr(runner, "MAX_TOOL_ROUNDS", 3)
+    again = ("thread.run.requires_action", wants_tools(("get_available_slots", "{}")))
+    c = FakeStreamingFoundry([created(), again], after_tools=[again])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert t.error == "stopped after 3 rounds of tool calls (possible loop)"
+    assert len(c.submitted) == 3
+
+
+def test_an_action_type_we_do_not_handle_stops_the_stream_cleanly():
+    c = FakeStreamingFoundry([created(), ("thread.run.requires_action",
+                                          run("requires_action", required_action={"type": "submit_tool_approval"}))])
+    t = runner.ask_streaming(c, "asst_1", "q", lambda text: None)
+    assert not t.ok and "do not handle" in t.error
+    assert c.submitted == [], "nothing is sent back for an action we did not run"
