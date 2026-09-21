@@ -195,3 +195,48 @@ def test_the_state_is_named_fields():
 def test_every_question_points_at_the_message_it_judges():
     for name, q in jev_triage.QUESTIONS.items():
         assert "`new_message`" in q["instructions"]["question"], name
+
+
+# ----------------------------------------------- a fallback must be visible
+
+
+@pytest.fixture
+def fresh_stats():
+    jev_triage.STATS.update(answered=0, fell_back=0)
+    yield jev_triage.STATS
+    jev_triage.STATS.update(answered=0, fell_back=0)
+
+
+def test_an_answer_is_counted(jev_on, monkeypatch, fresh_stats):
+    monkeypatch.setattr(typesafe, "ask", lambda *a, **k: answered(needs_diagnostics=0.9))
+    jev_triage.classify("my wipers squeak")
+    assert fresh_stats == {"answered": 1, "fell_back": 0}
+
+
+def test_a_fallback_is_counted(jev_on, monkeypatch, fresh_stats):
+    """Silent by design - the customer is answered either way - which is exactly
+    why it needs counting. A revoked key would otherwise send every message back
+    to the agent with nothing to say so."""
+    def down(*a, **k):
+        raise typesafe.TypeSafeUnavailable("HTTP 401: invalid api key")
+
+    monkeypatch.setattr(typesafe, "ask", down)
+    jev_triage.classify("my wipers squeak")
+    assert fresh_stats == {"answered": 0, "fell_back": 1}
+
+
+def test_an_unanswered_question_is_counted_as_a_fallback(jev_on, monkeypatch, fresh_stats):
+    half = answered(needs_diagnostics=0.9)
+    del half["answers"]["safety"]
+    monkeypatch.setattr(typesafe, "ask", lambda *a, **k: half)
+    jev_triage.classify("my brakes feel spongy")
+    assert fresh_stats["fell_back"] == 1
+
+
+def test_metrics_report_both(fresh_stats):
+    from services.orchestrator import app as app_module
+
+    fresh_stats.update(answered=40, fell_back=2)
+    m = app_module.metrics()
+    assert m["jev_answered"] == 40 and m["jev_fell_back"] == 2
+    assert m["triage_backend"] in ("agent", "jev")
