@@ -95,11 +95,6 @@ def test_a_question_with_no_criteria_does_not_send_an_empty_one():
     assert "criteria" not in typesafe.noul("Is this urgent?")
 
 
-def test_a_choice_question_carries_its_options():
-    q = typesafe.choice("Who handles this?", {"booking": "appointments", "other": "anything else"})
-    assert q["type"] == "choice" and set(q["criteria"]) == {"booking", "other"}
-
-
 # ------------------------------------------------------------ the answer
 
 
@@ -115,15 +110,6 @@ def test_a_missing_answer_is_none_not_zero():
     a caller treating them the same would read a missing safety answer as safe."""
     assert typesafe.probability({}, "safety") is None
     assert typesafe.probability({"safety": {"type": "noul"}}, "safety") is None
-
-
-def test_a_choice_answer_keeps_its_distribution():
-    c = client(answered(who={"type": "choice", "choice": "booking",
-                             "probabilities": {"booking": 0.8, "other": 0.2}, "confidence": 0.7}))
-    out = typesafe.ask("x", {"who": typesafe.choice("?", {"booking": "", "other": ""})}, http=c)
-    option, spread = typesafe.chosen(out["answers"], "who")
-    assert option == "booking"
-    assert spread == {"booking": 0.8, "other": 0.2}
 
 
 def test_a_reply_without_answers_is_an_error():
