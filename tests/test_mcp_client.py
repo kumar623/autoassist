@@ -189,3 +189,33 @@ def test_a_token_that_keeps_failing_gives_up():
     with pytest.raises(mcp_client.McpError, match="401"):
         c.list_tools()
     assert auth.calls.count(True) == 1, "refreshes once, not forever"
+
+
+def test_a_rejected_token_on_the_last_attempt_is_reported_not_crashed():
+    """Three outages then a 401: the refresh used to 'retry' past the end of the
+    loop and raise AssertionError('unreachable') instead of saying why."""
+    replies = [httpx.Response(503)] * azure_http.MAX_RETRIES + [httpx.Response(401, text="Authentication required")]
+
+    def outage_then_401(request):
+        return replies.pop(0)
+
+    c = mcp_client.McpClient(SECRET_URL, http_client=httpx.Client(transport=httpx.MockTransport(outage_then_401)),
+                             auth=FakeAuth())
+    with pytest.raises(mcp_client.McpError, match="401"):
+        c.list_tools()
+
+
+def test_a_request_httpx_will_not_send_is_not_retried_and_quotes_nothing():
+    """LocalProtocolError quotes the header it refuses - here, the bearer token."""
+    sent = []
+
+    def refused(request):
+        sent.append(request)
+        raise httpx.LocalProtocolError("Illegal header value b'Bearer s3cr3tkey0123456789 '")
+
+    c = mcp_client.McpClient(SECRET_URL, http_client=httpx.Client(transport=httpx.MockTransport(refused)),
+                             auth=FakeAuth())
+    with pytest.raises(mcp_client.McpError) as e:
+        c.list_tools()
+    assert len(sent) == 1
+    assert "s3cr3tkey" not in str(e.value) and e.value.__cause__ is None

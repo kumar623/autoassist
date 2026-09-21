@@ -123,7 +123,7 @@ def embed(text: str) -> list[float]:
         _client(),
         "POST",
         f"{base}/openai/deployments/{EMBED_DEPLOYMENT}/embeddings",
-        headers={"api-key": os.environ["AZURE_OPENAI_API_KEY"]},
+        headers={"api-key": _key("AZURE_OPENAI_API_KEY")},
         params={"api-version": os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview")},
         json={"input": [text]},
     )
@@ -137,11 +137,21 @@ def _query_index(body: dict) -> list[dict]:
         _client(),
         "POST",
         f"{base}/indexes('{INDEX_NAME}')/docs/search.post.search",
-        headers={"api-key": os.environ["SEARCH_API_KEY"]},
+        headers={"api-key": _key("SEARCH_API_KEY")},
         params={"api-version": SEARCH_API_VERSION},
         json=body,
     )
     return data.get("value") or []
+
+
+def _key(name: str) -> str:
+    """An API key from the environment, without the whitespace a paste brings.
+
+    A trailing space or newline copied along with a key is an illegal header
+    value: httpx refuses to send the request at all, and search fails on every
+    message. typesafe.py and zoho_auth.py already strip theirs.
+    """
+    return os.environ[name].strip()
 
 
 def fetch_all(fields: list[str], top: int = 1000) -> list[dict]:

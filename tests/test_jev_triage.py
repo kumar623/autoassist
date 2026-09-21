@@ -240,3 +240,47 @@ def test_metrics_report_both(fresh_stats):
     m = app_module.metrics()
     assert m["jev_answered"] == 40 and m["jev_fell_back"] == 2
     assert m["triage_backend"] in ("agent", "jev")
+
+
+# ---------------------------------------------- falling back quickly
+
+
+def test_jev_is_asked_briefly_and_once(jev_on, monkeypatch):
+    """The agent answers in about 2s. Waiting longer than that for Jev - or
+    retrying it - only costs the customer time, since the agent is the retry."""
+    seen = {}
+
+    def ask(state, questions, **kwargs):
+        seen.update(kwargs)
+        return answered(needs_diagnostics=0.9)
+
+    monkeypatch.setattr(typesafe, "ask", ask)
+    jev_triage.classify("my wipers squeak")
+    assert seen["retries"] == 0
+    assert seen["timeout"] is jev_triage.TIMEOUT
+    assert jev_triage.TIMEOUT.read <= 5 and jev_triage.TIMEOUT.connect <= 5
+
+
+def test_the_router_sends_jev_the_same_history_window_as_the_agent(jev_on, monkeypatch):
+    """Twenty turns of 8,000 characters is what the API accepts; none of it
+    needs to reach a third party to decide who answers."""
+    sent = {}
+
+    def ask(state, questions, **kwargs):
+        sent["state"] = state
+        return answered(needs_diagnostics=0.9)
+
+    monkeypatch.setattr(typesafe, "ask", ask)
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "2 CANDIDATES")
+    monkeypatch.setattr(_router, "ask", lambda client, agent_id, prompt, **k: _answer(k.get("agent_name", "")))
+    history = [{"role": "customer" if i % 2 == 0 else "assistant", "text": f"turn {i}"} for i in range(12)]
+    _router.handle(None, "my wipers squeak", agent_ids=ALL_IDS, history=history)
+    assert len(sent["state"]["conversation_so_far"]) == _router.MAX_HISTORY_TURNS
+    assert sent["state"]["conversation_so_far"][-1].endswith("turn 11")
+
+
+def _answer(agent_name):
+    from services.orchestrator.runner import TurnResult
+    t = TurnResult(agent_name=agent_name, status="completed")
+    t.answer = "Answer."
+    return t

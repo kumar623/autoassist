@@ -70,12 +70,13 @@ class McpClient:
             try:
                 r = self._http.post(self._url, headers=headers, content=json.dumps(payload))
             except httpx.TransportError as e:
-                if attempt == azure_http.MAX_RETRIES:
+                if attempt == azure_http.MAX_RETRIES or isinstance(e, azure_http.NOT_SENT):
                     raise McpError(f"could not reach the MCP server at {self.host}: {type(e).__name__}") from None
                 azure_http._pause(azure_http._backoff(attempt, None))
                 continue
-            if r.status_code == 401 and self._auth and not refreshed:
+            if r.status_code == 401 and self._auth and not refreshed and attempt < azure_http.MAX_RETRIES:
                 # The token was revoked or expired early: get a fresh one, once.
+                # Not on the last attempt, which would fall out of the loop.
                 headers["Authorization"] = f"Bearer {self._auth.token(force_refresh=True)}"
                 refreshed = True
                 continue

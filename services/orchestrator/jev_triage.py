@@ -42,6 +42,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
+import httpx
+
 from . import typesafe
 
 log = logging.getLogger(__name__)
@@ -61,6 +63,15 @@ SPECIALISTS = ("diagnostics", "booking", "escalation")
 # scored below.
 INTENT_CUT = float(os.getenv("JEV_INTENT_CUT", "0.6"))
 SAFETY_CUT = float(os.getenv("JEV_SAFETY_CUT", "0.7"))
+
+# How long to wait for Jev before asking the agent instead - and no retries.
+#
+# Jev answers in about 350ms and the agent it falls back to takes about 2s, so
+# the fallback IS the retry: waiting longer for Jev only ever costs the customer
+# time. Without this, a stalled connection inherited azure_http's patience - a
+# 30s read timeout, four attempts and 3.5s of backoff, about two minutes, longer
+# than the 90s the whole request is allowed.
+TIMEOUT = httpx.Timeout(3.0, connect=2.0)
 
 # An Indian registration, as customers type it: AP31BD1213, "ap 31 bd 1213".
 # Jev cannot hand back a value it was not given options for, so this is code's
@@ -238,7 +249,7 @@ def classify(message: str, history: list | None = None) -> Classification | None
     """
     started = time.time()
     try:
-        answer = typesafe.ask(state_for(message, history), QUESTIONS)
+        answer = typesafe.ask(state_for(message, history), QUESTIONS, timeout=TIMEOUT, retries=0)
     except typesafe.TypeSafeUnavailable as e:
         log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
         STATS["fell_back"] += 1

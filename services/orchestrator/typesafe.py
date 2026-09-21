@@ -6,13 +6,13 @@ a probability ("noul"), a choice with a probability per option, or a score. Ever
 question in one request is evaluated against the state in parallel.
 
 That shape fits exactly one part of this service: triage, which reads a message
-and returns JSON saying who should handle it and whether it looks like a safety
-issue. Nothing here is wired into the request path. It exists so that
-evals/compare_triage.py can measure Jev against the triage agent we actually run,
-the same way gpt-4.1-nano was measured and rejected (docs/evaluation.md).
+and decides who should handle it and whether it looks like a safety issue.
+jev_triage.py uses this client on the live request path when TRIAGE_BACKEND=jev,
+and evals/compare_triage.py uses it to measure Jev against the triage agent
+(docs/evaluation.md, finding 16).
 
 No vendor SDK, for the reasons in docs/decisions/007: it is one JSON POST, and
-`typesafe-sdk` needs Python 3.10+ while the venv these evals run in is 3.9 -
+`typesafe-sdk` needs Python 3.10+ while the local venv the evals run in is 3.9 -
 the same constraint that kept the MCP SDK out (mcp_client.py).
 
 THE API KEY IS A SECRET. It travels in the Authorization header, so unlike
@@ -114,12 +114,17 @@ def choice(instructions: str, options: dict) -> dict:
     return {"type": "choice", "instructions": instructions, "criteria": options}
 
 
-def ask(state, questions: dict, http: httpx.Client | None = None, timeout: float | None = None) -> dict:
+def ask(state, questions: dict, http: httpx.Client | None = None,
+        timeout: httpx.Timeout | float | None = None, retries: int = azure_http.MAX_RETRIES) -> dict:
     """Put `questions` to Jev about `state`. Returns {"answers": ..., "usage": ...}.
 
     `state` may be a string or any JSON-serialisable structure; the API takes
     both. Raises TypeSafeUnavailable for anything that stops an answer coming
     back, with no key and no URL in the message.
+
+    `timeout` and `retries` default to azure_http's - patient, right for an
+    eval. A caller with a fallback should pass less of both: waiting out three
+    retries costs more than asking the fallback.
     """
     key = os.getenv("TYPESAFE_API_KEY", "").strip()
     if not key:
@@ -133,27 +138,29 @@ def ask(state, questions: dict, http: httpx.Client | None = None, timeout: float
     host = httpx.URL(ENDPOINT).host
 
     throttled = False
-    for attempt in range(azure_http.MAX_RETRIES + 1):
+    for attempt in range(retries + 1):
         try:
             r = client.post(ENDPOINT, headers=headers, content=json.dumps(body),
                             timeout=timeout or azure_http.TIMEOUT)
         except httpx.TransportError as e:
-            if attempt == azure_http.MAX_RETRIES:
-                # `from None`: httpx's exception repeats the URL, and one day
-                # that URL may carry something worth not repeating.
+            if attempt == retries or isinstance(e, azure_http.NOT_SENT):
+                # `from None`: httpx's exception can quote the Authorization
+                # header in full (LocalProtocolError), and that header is the key.
                 raise TypeSafeUnavailable(f"could not reach {host}: {type(e).__name__}") from None
             azure_http._pause(azure_http._backoff(attempt, None))
             continue
 
         if r.status_code == 429:
             wait = azure_http._backoff(0, r.headers.get("retry-after"))
-            if not throttled and wait <= THROTTLE_PATIENCE_SECONDS:
+            # Not on the last attempt: that fell out of the loop into the
+            # AssertionError below instead of saying what happened.
+            if not throttled and wait <= THROTTLE_PATIENCE_SECONDS and attempt < retries:
                 throttled = True
                 azure_http._pause(wait)
                 continue
             raise TypeSafeUnavailable(f"{host} is rate limiting this key (HTTP 429)")
 
-        if r.status_code == OVERLOADED and attempt < azure_http.MAX_RETRIES:
+        if r.status_code == OVERLOADED and attempt < retries:
             azure_http._pause(azure_http._backoff(attempt, r.headers.get("retry-after")))
             continue
 

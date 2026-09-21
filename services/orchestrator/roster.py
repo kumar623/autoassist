@@ -18,7 +18,7 @@ import logging
 import os
 import pathlib
 
-from . import tools
+from . import jev_triage, tools
 from .cache import TimedCache
 
 log = logging.getLogger(__name__)
@@ -80,8 +80,14 @@ def _read(path: pathlib.Path) -> dict | None:
 
 
 def triage_backend() -> str:
-    """Which classifier is deciding the route, for the panel to say out loud."""
-    return "jev" if os.getenv("TRIAGE_BACKEND", "agent").strip().lower() == "jev" else "agent"
+    """Which classifier is deciding the route, for the panel to say out loud.
+
+    Asks jev_triage rather than reading TRIAGE_BACKEND again: switched on with
+    no key, Jev is never called, the agent answers every message, and a
+    /metrics that still said "jev" would be the silent fallback STATS exists
+    to expose.
+    """
+    return "jev" if jev_triage.configured() else "agent"
 
 
 def load(deployed: dict | None = None) -> dict:

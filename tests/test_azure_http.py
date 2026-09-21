@@ -130,7 +130,35 @@ def test_a_dropped_connection_is_retried():
 
 def test_a_connection_that_keeps_failing_raises():
     c = client(*[httpx.ConnectError("down")] * (azure_http.MAX_RETRIES + 1))
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(azure_http.Unreachable, match="GET https://x/run -> no answer: ConnectError"):
+        azure_http.request(c, "GET", "https://x/run")
+    assert len(c.seen) == azure_http.MAX_RETRIES + 1
+
+
+def test_a_request_httpx_will_not_send_is_not_retried_and_quotes_nothing():
+    """21 September: a key pasted with page text around it. httpx refused the
+    header and said so in full - LocalProtocolError quotes the value, and the
+    value was the api-key header. With a real key and a stray space, that is
+    the key in Log Analytics and in the tool output the model reads."""
+    refusal = httpx.LocalProtocolError("Illegal header value b' s3cr3tkey0123456789 '")
+    c = client(refusal)
+    with pytest.raises(azure_http.Unreachable) as e:
+        azure_http.request(c, "POST", "https://x/openai/deployments/emb/embeddings?api-version=1",
+                           headers={"api-key": "irrelevant"})
+    assert len(c.seen) == 1, "the same malformed request fails the same way every time"
+    assert "s3cr3tkey" not in str(e.value)
+    assert "LocalProtocolError" in str(e.value)
+    # A log.exception further up prints the chain; there must not be one.
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+
+
+def test_a_short_throttle_on_the_last_attempt_is_reported_not_crashed():
+    """Three outages then a brief 429 used to 'retry' past the end of the loop
+    and raise AssertionError('unreachable') - a 500 where the customer should
+    have been told the service is busy."""
+    c = client(*[httpx.Response(503)] * azure_http.MAX_RETRIES,
+               httpx.Response(429, headers={"retry-after": "1"}))
+    with pytest.raises(azure_http.Throttled):
         azure_http.request(c, "GET", "https://x/run")
 
 

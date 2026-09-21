@@ -137,9 +137,19 @@ def test_the_panel_says_which_classifier_is_deciding(monkeypatch):
     """The choice is the demo. A page that cannot say which one answered cannot
     show the difference."""
     monkeypatch.setenv("TRIAGE_BACKEND", "jev")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
     assert roster.load()["triage_backend"] == "jev"
     monkeypatch.setenv("TRIAGE_BACKEND", "agent")
     assert roster.load()["triage_backend"] == "agent"
+
+
+def test_jev_switched_on_without_a_key_is_reported_as_the_agent(monkeypatch):
+    """Jev is never called without a key, so the agent answers every message.
+    Reporting "jev" then would be exactly the silent fallback STATS is there to
+    catch."""
+    monkeypatch.setenv("TRIAGE_BACKEND", "jev")
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    assert roster.triage_backend() == "agent"
 
 
 def test_the_backend_defaults_to_the_agent(monkeypatch):
