@@ -27,14 +27,23 @@ small outage into a large one.
 
 ## The one that matters most: ungrounded answers
 
-Every diagnostics answer must come from a document. `searched == false` means
-it answered from the model's own training, which is finding 1 and the worst
-failure this system has.
+Every diagnostics answer must come from a document. A reply with no search
+behind it was written from the model's own training, which is finding 1 and the
+worst failure this system has.
+
+Read `searched` from the **`chat.request`** span, not from `agent.turn`. The
+router searches the library itself before the diagnostics agent runs
+(`router.prefetch_documents`) and tells the agent not to search again for the
+same question. So on a well-grounded answer the agent's own turn usually made
+no search call, and its `agent.turn` span says `searched = false`.
+`chat.request` sets `searched` after the pre-search has been added to the
+diagnostics turn, so it counts both kinds.
 
 ```kql
-traces
+dependencies
 | where timestamp > ago(24h)
-| where customDimensions["autoassist.agent"] == "diagnostics"
+| where name == "chat.request"
+| where tostring(customDimensions["autoassist.agents"]) contains "diagnostics"
 | extend searched = tobool(customDimensions["autoassist.searched"])
 | summarize total = count(), ungrounded = countif(searched == false)
 | extend pct = round(100.0 * ungrounded / total, 1)
@@ -45,14 +54,18 @@ Anything above zero needs investigating the same day. To see them:
 ```kql
 dependencies
 | where timestamp > ago(24h)
-| where name == "agent.turn"
-| where customDimensions["autoassist.agent"] == "diagnostics"
+| where name == "chat.request"
+| where tostring(customDimensions["autoassist.agents"]) contains "diagnostics"
 | where tobool(customDimensions["autoassist.searched"]) == false
 | project timestamp, operation_Id, duration,
-          status = customDimensions["autoassist.status"],
+          agents = customDimensions["autoassist.agents"],
+          failed_turns = customDimensions["autoassist.failed_turns"],
           error  = customDimensions["autoassist.error"]
 | order by timestamp desc
 ```
+
+One way it happens: the pre-search fails - the service log says `pre-search
+failed, the agent will search itself` - and the agent does not search either.
 
 Take an `operation_Id` and paste it into Transaction Search to see the whole
 request — routing decision, every agent, every tool call.
@@ -84,9 +97,16 @@ dependencies
 | summarize count() by source = tostring(customDimensions["autoassist.safety_source"])
 ```
 
-`keyword` = triage missed it, the regex saved us.
-`triage` = the model caught something the regex has no word for — good.
+`keyword` = the classifier missed it, the regex saved us.
+`triage` = the triage agent caught something the regex has no word for — good.
+`jev` = the same, when Jev is routing (`TRIAGE_BACKEND=jev`): its safety
+probability was at or above `JEV_SAFETY_CUT`.
 `both` = agreement.
+`none` = nobody flagged it — most messages.
+
+On the Jev path the span also carries `backend = jev` and each probability
+(`p_safety`, `p_needs_diagnostics`, ...), so a false alarm can be read as a
+number rather than a guess.
 
 ---
 
@@ -210,8 +230,11 @@ dependencies
 | order by n asc
 ```
 
-Known baseline as of week 3: about 21s for a three-agent reply, roughly 7s each
-plus overhead. Sequential. See README limitations.
+Known baseline, measured in week 3: about 12s for a three-agent reply, down from
+20s once independent specialists ran in parallel (`docs/evaluation.md`, "Week 3
+— latency"). Booking's turn is hidden inside diagnostics'; triage and
+diagnostics are what remain. With Jev routing, triage is about 350ms at the
+median instead of about 2s (finding 16).
 
 Tool call timings:
 
@@ -225,8 +248,12 @@ dependencies
 ```
 
 Retrieval should sit near 1s (an embedding call plus a search). Booking tools
-should be a few milliseconds — they are a local file. A booking tool taking
-seconds means the storage layer changed and nobody updated this line.
+call Zoho Bookings over MCP (decision 008), so they take network round trips,
+not the 2ms the old local file did; slot lookups are cached for
+`ZOHO_CACHE_SECONDS` (60 by default).
+
+These are only the tools the agents called. The router's own pre-search runs
+before the diagnostics agent and opens no `tool.call` span, so it is not here.
 
 ---
 
@@ -234,6 +261,11 @@ seconds means the storage layer changed and nobody updated this line.
 
 The tool output's first line reports what the filters did. It is captured in
 `result_head`, so filtering can be watched without re-running searches.
+
+**These queries see only the searches an agent made itself.** The pre-search the
+router runs before diagnostics - now the usual one - opens no `tool.call` span.
+Its line, `retrieval query=... -> N kept of M candidates`, is in the container's
+console log, not in Application Insights.
 
 ```kql
 dependencies
@@ -338,9 +370,9 @@ safe, but it should not be happening.
 
 | Alert | Condition | Why |
 |---|---|---|
-| Ungrounded answers | any diagnostics turn with `searched == false` in 1h | worst failure mode; should never happen |
+| Ungrounded answers | any `chat.request` that ran diagnostics with `searched == false` in 1h | worst failure mode; should never happen. Not `agent.turn` - see above |
 | Safety not escalated | any safety request without escalation in 1h | a routing bug |
-| p95 latency | > 40s over 15 min | roughly double baseline |
+| p95 latency | > 25s over 15 min | roughly double the ~12s baseline |
 | Failure rate | > 5% of requests in 15 min | |
 | AOAI throttling | any 429 in 5 min | quota exhausted; customers are told we are busy |
 | Refusing visitors | `chat.refused` rising over 15 min | a script, or the limit is too tight - group by visitor first |
@@ -352,22 +384,28 @@ safe, but it should not be happening.
 ## Common problems
 
 **Every request fails, `/ready` says no Azure client.** Credentials. Locally:
-`az account show`. In Azure: the container's managed identity needs the
-**Azure AI Developer** role on the Foundry project.
+`az account show`. In Azure: the app's managed identity, `id-autoassist`, needs
+**Foundry User** on the Foundry account `rg-autoassist`. With a weaker role such
+as Cognitive Services User it signs in and gets back an empty list of agents,
+which `/ready` reports as `agents not deployed` - the 12 September rollback in
+`docs/deploy.md`.
 
 **Runs sit in `in_progress` then time out.** This happened in week 2 with the
 built-in Azure AI Search tool on vector query types (evaluation.md, finding 5).
 If it returns, check whether the tool configuration changed. The run loop gives
 up at 90s rather than hanging; that limit is `REQUEST_TIMEOUT`.
 
-**Answers are correct but have no citations.** Check `tool.call` spans for that
-operation. No `search_service_docs` call means the prompt changed, or the tool
-failed to attach during deploy. `deploy_agents.py --list` shows what each agent
-actually has.
+**Answers are correct but have no citations.** Check `searched` on that
+operation's `chat.request` span, and the trace in the API response: the
+pre-search appears there as a `search_service_docs` call marked
+`run_before_the_agent`. `tool.call` spans show only searches the agent made
+itself, so their absence alone proves nothing. If there was no search at all,
+the prompt changed or the tool failed to attach during deploy;
+`deploy_agents.py --list` shows what each agent actually has.
 
 **Everything is slow, tool calls are fast.** The time is in the model, not in
-us. Check Azure OpenAI quota and for 429s. Sequential agents are the design; see
-README limitations.
+us. Check Azure OpenAI quota and for 429s. Independent specialists run in
+parallel, so a slow reply is triage plus the slowest specialist, not the sum.
 
 **Customers are told we are busy, but traffic is low.** Check `throttled` before
 `refused`. Being throttled is Azure's quota, not our limit, and our limit does
@@ -380,6 +418,83 @@ It only ever holds plain fault-code answers - never a booking, an escalation or
 anything safety-flagged. To turn it off in the live app:
 `az containerapp update -g "$RG" -n "$APP" --set-env-vars ANSWER_CACHE_SECONDS=0`.
 
-**Bookings vanished.** The store is `data/bookings.json` inside the container.
-Container restarts lose it. That is a known limitation, not a bug — Table
-Storage is the fix.
+**Tickets vanished.** Tickets are a JSON file inside the container
+(`TICKET_STORE`, `/app/data/tickets.json`), and a restart or a deploy loses
+them. A known limitation, not a bug.
+
+**A booking is missing.** Bookings are in Zoho Bookings (decision 008), which
+survives restarts - look there first. Then check the app has
+`BOOKING_BACKEND=zoho`: with `file` it books into a JSON file in the container,
+which the next restart loses.
+
+**Searches fail on every message, but `/ready` is green.** `/ready` checks the
+agents, not the keys, so a bad search or OpenAI key does not show there. See
+"Keys" below: on 21 September this was page text pasted into `openai-key`.
+
+---
+
+## Keys
+
+The app's six keys are in Key Vault `kv-autoassist-kk`, and the container app
+holds only references to them, resolved by its identity `id-autoassist`
+(`docs/decisions/010-keys-in-key-vault.md`). Neither procedure below needs a
+deploy.
+
+### Rotating a key
+
+1. **Add the new value as a new version**, from a terminal (`openai-key` here;
+   the other five work the same way). On 21 September a portal paste put page
+   text into `openai-key`; httpx refused to send it as a header and search
+   failed on every message until a correct version was added.
+
+   ```bash
+   read -rs NEW_VALUE     # paste, press Enter; nothing is echoed
+   az keyvault secret set --vault-name kv-autoassist-kk -n openai-key \
+     --value "$NEW_VALUE" -o none
+   unset NEW_VALUE
+   ```
+
+   `-o none` matters: the command's output includes the value it stored.
+
+2. **Check its shape without printing it.** A key has no spaces, and its length
+   is the length of what you meant to copy. Page text fails both.
+
+   ```bash
+   az keyvault secret show --vault-name kv-autoassist-kk -n openai-key \
+     --query "{length: length(value), has_space: contains(value, ' ')}"
+   ```
+
+3. **Wait.** The references have no version in them, so Container Apps picks up
+   the new version by itself within 30 minutes - 12 minutes on 21 September -
+   and restarts the revision. Then ask the app a fault-code question and check
+   the trace shows a search that found something.
+
+4. **Only then retire the old key.** Azure OpenAI and AI Search each have two
+   keys: put the other one in the vault (steps 1 to 3), then regenerate the one
+   the app stopped using. Revoke first and the app is down until the new
+   version reaches it.
+
+### Key Vault reference not resolving
+
+A revision that will not start, or one that starts and then fails every search,
+after anything changed in the vault or the app's identity. Check, in order:
+
+```bash
+# What the app points at: names and vault URLs, never values.
+az containerapp show -g Ai_solution -n ca-autoassist \
+  --query "properties.configuration.secrets[].{name:name, vault:keyVaultUrl}" -o table
+
+# That each secret exists. Names only; `show` would return the value.
+az keyvault secret list --vault-name kv-autoassist-kk --query "[].name" -o tsv
+
+# That the app's identity may read them. Expect "Key Vault Secrets User".
+az role assignment list \
+  --assignee "$(az identity show -g Ai_solution -n id-autoassist --query principalId -o tsv)" \
+  --scope "$(az keyvault show -n kv-autoassist-kk --query id -o tsv)" \
+  --query "[].roleDefinitionName" -o tsv
+```
+
+A secret deleted by mistake is recoverable, because soft delete is on:
+`az keyvault secret list-deleted --vault-name kv-autoassist-kk`, then
+`az keyvault secret recover`. A deploy cannot fix any of this: the GitHub
+deploy identity has no role on the vault, by design.

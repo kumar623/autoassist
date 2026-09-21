@@ -37,7 +37,8 @@ Zoho's MCP URL contains an access key and is refused on its own (HTTP 401). The
 server requires OAuth 2.1, advertised at the standard discovery addresses:
 dynamic client registration, browser approval with PKCE, then refresh tokens.
 `scripts/zoho_login.py` does this once; the tokens live in `.env` locally and in
-container app secrets in Azure. No password reaches the app.
+Key Vault in Azure, where the container app holds references to them (decision
+010). No password reaches the app.
 
 ## What Zoho gives us, and what it costs
 Gained: appointments in the workshop's real calendar, surviving deploys, shared
@@ -71,6 +72,10 @@ only in memory: it cannot write back to a container app secret. A restart would
 fall back to the stored one. Rotation was not seen in testing; the fix, if it
 starts happening, is to store the token where the app can write - Key Vault or
 Table Storage.
+
+(21 September 2026: the token is now in Key Vault, but the app's identity has
+only Key Vault Secrets User - read, not write - so this limitation stands. Fixing
+it would mean letting the app write that one secret.)
 
 ## Revisit when
 - Bookings need to be read back in bulk (reporting): Zoho's filters are limited,

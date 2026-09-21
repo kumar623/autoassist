@@ -4,11 +4,13 @@ Everything AutoAssist runs on, described as code.
 
 `terraform apply` in an empty subscription gives you the whole environment:
 resource group, AI Foundry resource with two model deployments, AI Search,
-storage, container registry, a container app, and Application Insights wired to
-a Log Analytics workspace.
+container registry, a container app, and Application Insights wired to a Log
+Analytics workspace.
 
-Why it is written for a *fresh* environment rather than imported from the one
-that exists: `docs/decisions/006-terraform.md`.
+**The live environment was not built from this.** It was created by hand and by
+`scripts/setup_deploy_target.sh`, and this code has been planned, never
+applied. Why it is written for a *fresh* environment rather than imported from
+the one that exists: `docs/decisions/006-terraform.md`.
 
 ## Files
 
@@ -16,7 +18,7 @@ that exists: `docs/decisions/006-terraform.md`.
 |---|---|
 | `versions.tf` | Terraform and provider versions, provider behaviour, the commented-out remote backend |
 | `variables.tf` | Everything you might want to change, with validation |
-| `main.tf` | The 17 resources |
+| `main.tf` | The 15 resources |
 | `outputs.tf` | Endpoints, keys, and a ready-made `.env` |
 | `terraform.tfvars.example` | Copy to `terraform.tfvars` and edit |
 
@@ -60,14 +62,38 @@ environment.
 
 `terraform output next_steps` prints this, but in short:
 
-1. **Two portal steps.** Terraform cannot create the Foundry *project* inside
-   the AI resource, nor the project's connection to the search service. Both are
-   a few clicks at <https://ai.azure.com>.
+1. **One portal step.** Terraform cannot create the Foundry *project* inside
+   the AI resource. It is a few clicks at <https://ai.azure.com>. (No search
+   connection is needed: the agents search through a function tool this
+   service runs, `search_service_docs`, not through a Foundry connection.)
 2. `terraform output -raw env_file > ../.env` — writes a complete `.env`,
    secrets included. It is gitignored. Do not paste it anywhere.
-3. `make data && make reindex` — generate the bulletins, build the index.
+3. `make data CONFIRM=1 && make reindex CONFIRM=1` — generate the bulletins,
+   build the index. Both refuse without `CONFIRM=1`, because pointed at the
+   live search service they would destroy it: see below.
 4. `python3 agents/deploy_agents.py` — create the four agents.
-5. `make evals` — 16 cases; they should all pass.
+5. `make evals` — the 20 golden-set cases. The last recorded full run passed
+   19; the known failure, `convo-diag-01`, is written up in
+   `docs/evaluation.md` under finding 13.
+
+### Never against the live index
+
+`make data` then `make reindex`, each with `CONFIRM=1`, is how an empty
+environment gets its index. It is not a setup step for the environment that
+already exists, and it would wipe it:
+
+- `reindex` deletes the index and rebuilds it from `data/synthetic_bulletins/`.
+  The PDFs the live index came from no longer exist, so the 279 bulletin chunks
+  would be lost and only the 91 fault-code and maintenance chunks rebuilt.
+- `data` writes 30 *different* bulletins under the same names (TSB-001 to
+  TSB-030; the model runs at temperature 0.8), and a later `make ingest` would
+  overwrite the live chunks in place, because chunk ids are a hash of file name
+  and section.
+
+The live index is the only complete copy. A JSON export of its 370 documents,
+without the vectors, is kept locally as
+`data/index_backup/service-docs-2026-09-19.json` - not committed, and not in a
+fresh clone. Rebuilding from it would mean re-embedding every chunk.
 
 ## Shutting it down
 
@@ -93,7 +119,6 @@ demo use:
 | Container app, idle | £0 (scales to zero) |
 | Container registry, Basic | ~£4/month |
 | Log Analytics + App Insights | ~£0–2/month at this volume |
-| Storage | pennies |
 | Model calls | pay per token; the full eval suite is a few pence |
 
 Call it £500–900/month in rupees terms — well under ₹1,000 — provided you do not
@@ -106,9 +131,11 @@ leave a load test running. The single biggest cost risk is switching
   real production deployment would isolate the network; this is a demo on a
   personal subscription and the isolation would cost more than everything else
   combined.
-- **No Key Vault for application secrets.** The container app gets its
-  configuration as environment variables and its Azure access through a managed
-  identity, so there is no application secret to store. The ingestion scripts
+- **No Key Vault.** The container app here gets the OpenAI and Search keys as
+  plain container app secrets. The live app does not: its six keys live in Key
+  Vault `kv-autoassist-kk`, and the app holds only references to them, resolved
+  by its managed identity. That vault was created by hand and is not in this
+  code. See `docs/decisions/010-keys-in-key-vault.md`. The ingestion scripts
   use keys from `.env` on a laptop.
 - **State is local.** Fine for one person. See `versions.tf` for the remote
   backend a team needs, and 006 for why it matters.
@@ -127,9 +154,10 @@ The model is not offered in `location`. Check
 You already have one — probably the hand-made one. Either set
 `search_sku = "basic"` (paid) or delete the old service.
 
-**`StorageAccountAlreadyTaken`**
-The random suffix collided, which is unlucky. `terraform taint
-random_string.unique && terraform apply` rolls a new one.
+**A name already taken** (registry, search service or AI subdomain)
+These are unique across all of Azure, and the random suffix collided, which is
+unlucky. `terraform taint random_string.unique && terraform apply` rolls a new
+one.
 
 **`plan` wants to change the container image every time**
 The `lifecycle.ignore_changes` block is missing or mistyped. It should be

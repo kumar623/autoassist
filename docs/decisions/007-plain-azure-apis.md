@@ -89,6 +89,15 @@ What the SDKs did for free is now ours:
   same requirements. When the scripts move, the three SDKs leave
   `requirements.txt`.
 
+  (21 September 2026: it is smaller now, by a different route. The image
+  installs only `requirements-service.txt` - FastAPI, uvicorn, pydantic, httpx,
+  `azure-identity`, python-dotenv and the telemetry exporter - and
+  `requirements.txt` includes that file and adds the rest for laptops and CI.
+  `search_test.py` and the scorer's lookup now go through `retrieval.py`; the
+  SDKs remain only for `ingest.py`, `generate_bulletins.py` and
+  `deploy_agents.py`, which never run in the container. `azure-ai-projects`,
+  which nothing imported, is gone.)
+
 ## Revisit when
 - Foundry's agent API has a GA SDK with stable names, and we need something
   from it that is more than a few requests (streaming runs, file search).
