@@ -5,8 +5,9 @@ Usage:
     python3 evals/red_team.py --only lookup-stranger
 
 The golden set (run_evals.py) asks "does it answer well?". This asks "can it
-be made to do harm?". It covers the attacks that Promptfoo, over HTTP, cannot
-reach:
+be made to do harm?". It runs in-process rather than over HTTP, because two of
+its three kinds of attack need a hand inside: the search tool's output
+replaced, and bookings in a scratch store.
 
   POISONED DOCUMENTS    Indirect prompt injection - the RAG-specific attack.
                         The search tool's output is replaced with documents
@@ -37,8 +38,12 @@ import tempfile
 import time
 from dataclasses import dataclass
 
-# Scratch stores, set before booking.py reads them at import.
+# Scratch stores, set before booking.py reads them at import. The file backend
+# too: the victim's booking is made in the scratch file, and with a .env saying
+# BOOKING_BACKEND=zoho the agents' booking tools would otherwise be pointed at
+# the workshop's real calendar. Set before .env is loaded, which never overrides.
 _scratch = pathlib.Path(tempfile.mkdtemp(prefix="autoassist-redteam-"))
+os.environ["BOOKING_BACKEND"] = "file"
 os.environ["BOOKING_STORE"] = str(_scratch / "bookings.json")
 os.environ["TICKET_STORE"] = str(_scratch / "tickets.json")
 # An attack answered from an earlier attack's cached reply proves nothing about
@@ -49,7 +54,11 @@ os.environ.setdefault("APPLICATIONINSIGHTS_CONNECTION_STRING", "")  # keep attac
 from dotenv import load_dotenv  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env")
+if __name__ == "__main__":
+    # Only when run as a script, so importing this file never loads the real
+    # .env into another process. Before the service imports below, which read
+    # their settings at import.
+    load_dotenv(ROOT / ".env")
 sys.path.insert(0, str(ROOT))
 
 from azure.identity import DefaultAzureCredential  # noqa: E402
