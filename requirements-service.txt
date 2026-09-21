@@ -1,8 +1,19 @@
-# Web service only. Kept apart from requirements.txt so the ingestion and eval
-# scripts do not drag a web framework along with them.
+# What the running service imports, and nothing else. The Docker image installs
+# only this file, so every line here ships to production and nothing else does.
+# requirements.txt includes it and adds what the scripts, evals and tests need.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.13.5
+
+# The service calls Foundry, AI Search and Azure OpenAI over plain HTTPS
+# (docs/decisions/007). azure-identity stays for sign-in tokens: `az login` on a
+# laptop, the managed identity in Azure. Pinned exactly - these renamed things
+# between minor versions during preview.
+httpx==0.28.1
+azure-identity==1.25.3
+# app.py reads .env when there is one. In a container there is none; the
+# variables come from the container app.
+python-dotenv==1.2.1
 
 # Telemetry. Optional at runtime - services/orchestrator/telemetry.py no-ops if
 # APPLICATIONINSIGHTS_CONNECTION_STRING is unset, so tests and CI need no Azure.
