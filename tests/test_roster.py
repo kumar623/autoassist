@@ -78,7 +78,7 @@ def test_an_agent_that_is_not_deployed_is_shown_as_such():
 def test_a_missing_definition_file_does_not_break_the_page(monkeypatch, tmp_path):
     monkeypatch.setattr(roster, "DEFINITIONS", tmp_path)
     roster._ROSTER.clear()
-    assert roster.load() == {"agents": [], "count": 0}
+    assert roster.load() == {"agents": [], "count": 0, "triage_backend": "agent"}
 
 
 def test_a_broken_definition_file_is_skipped(monkeypatch, tmp_path):
@@ -128,3 +128,20 @@ def test_the_backend_is_not_cached_from_an_earlier_call(monkeypatch):
     assert "MCP" in roster.load()["agents"][2]["tools"][0]["backend"]
     monkeypatch.setenv("BOOKING_BACKEND", "file")
     assert "MCP" not in roster.load()["agents"][2]["tools"][0]["backend"]
+
+
+# ------------------------------------------------- which classifier is live
+
+
+def test_the_panel_says_which_classifier_is_deciding(monkeypatch):
+    """The choice is the demo. A page that cannot say which one answered cannot
+    show the difference."""
+    monkeypatch.setenv("TRIAGE_BACKEND", "jev")
+    assert roster.load()["triage_backend"] == "jev"
+    monkeypatch.setenv("TRIAGE_BACKEND", "agent")
+    assert roster.load()["triage_backend"] == "agent"
+
+
+def test_the_backend_defaults_to_the_agent(monkeypatch):
+    monkeypatch.delenv("TRIAGE_BACKEND", raising=False)
+    assert roster.load()["triage_backend"] == "agent"

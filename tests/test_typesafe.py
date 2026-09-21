@@ -235,3 +235,31 @@ def test_importing_never_raises_however_it_is_configured(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     importlib.reload(typesafe)
     assert typesafe.model() == typesafe.DEFAULT_MODEL
+
+
+# ------------------------------------------------- one connection, reused
+
+
+def test_the_client_is_shared_between_calls():
+    """A fresh connection per call was 1,115ms from Vizag; a reused one 391ms.
+    Almost two thirds of the latency was a TCP and TLS handshake being thrown
+    away and paid again."""
+    typesafe.close()
+    first = typesafe._shared_client()
+    assert typesafe._shared_client() is first
+    typesafe.close()
+    assert typesafe._shared_client() is not first
+
+
+def test_closing_twice_is_harmless():
+    typesafe.close()
+    typesafe.close()
+
+
+def test_a_caller_supplied_client_is_used_instead():
+    """Tests pass their own, and so could a caller wanting its own pool."""
+    typesafe.close()
+    c = client(answered(q=NOUL))
+    typesafe.ask("x", {"q": typesafe.noul("?")}, http=c)
+    assert len(c.seen) == 1
+    assert typesafe._CLIENT is None, "the shared one was never created"

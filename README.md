@@ -21,7 +21,7 @@ triage → diagnostics → booking · searched documents · 7,071 tokens · 11.9
 
 > Week 3 of 3. Working: retrieval, four agents, parallel routing, HTTP API,
 > chat page, container, CI, App Insights tracing, automated evals (19/20).
-> Not yet: deployment pipeline, Terraform. See [Status](#status).
+> Not yet: model-graded evaluation, authentication on /chat. See [Status](#status).
 
 ---
 
@@ -201,7 +201,7 @@ evals/golden_set.jsonl   16 test cases, several from real regressions
 docs/
   evaluation.md          the seven findings
   decisions/             why things are the way they are
-tests/                   50 offline tests
+tests/                   631 offline tests
 ```
 
 ---
@@ -224,13 +224,15 @@ controlled JSON · code-based routing with an independent safety check ·
 independent specialists run in parallel · function tools executed in-process ·
 run loop with timeouts and per-call logging · OpenTelemetry tracing into
 Application Insights · FastAPI with liveness and readiness · chat page showing
-the trace · Dockerfile · GitHub Actions CI · 112 offline tests · automated
+the trace · Dockerfile · GitHub Actions CI and a deploy pipeline with a
+verified rollback · 631 offline tests · automated
 eval suite scoring 20 cases on trace facts, 19/20 passing (the one failure is
 known and written up as finding 13 in docs/evaluation.md).
 
-**Not done yet:** deployment pipeline (CI runs tests, builds the image and runs
-the smoke evals; it does not deploy) · Terraform (resources were created by
-hand) · model-graded evaluation (the scorer checks compliance, not quality).
+**Not done yet:** model-graded evaluation (the scorer checks compliance, not
+quality) · authentication on `/chat` (it is rate limited, not signed in) ·
+Terraform describes a fresh environment in `infra/` but the live one was created
+by hand and is not under its management (decision 006).
 
 **Known limitations:**
 
@@ -258,6 +260,14 @@ hand) · model-graded evaluation (the scorer checks compliance, not quality).
   5,000–9,000 a message is roughly 12–20 messages a minute; 10,000 messages
   would take about eleven hours and cost about £30. More traffic than that needs
   more quota, not a faster service.
+- **Routing can be classified by Jev instead of a chat model**
+  (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages: 63/72 routes right
+  against the agent's 52/72, two safety false alarms against seven, 352ms
+  against 2,118ms. Off by default, falls back to the agent for anything it
+  cannot answer, and the keyword safety net still runs on top — Jev scored a
+  routine Hinglish complaint over the safety bar, and the vendor documents lower
+  non-English accuracy. See
+  [docs/evaluation.md](docs/evaluation.md) findings 15 and 16.
 - **No reranker** on the Free search tier.
 - **The relevance floor cannot judge topic.** It measures agreement between
   search methods, not whether a document is about the right component. A clutch

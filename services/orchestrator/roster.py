@@ -79,6 +79,11 @@ def _read(path: pathlib.Path) -> dict | None:
         return None
 
 
+def triage_backend() -> str:
+    """Which classifier is deciding the route, for the panel to say out loud."""
+    return "jev" if os.getenv("TRIAGE_BACKEND", "agent").strip().lower() == "jev" else "agent"
+
+
 def load(deployed: dict | None = None) -> dict:
     """The four agents, their tools, and whether each is actually deployed.
 
@@ -95,6 +100,7 @@ def load(deployed: dict | None = None) -> dict:
             for a in agents
         ],
         "count": len(agents),
+        "triage_backend": triage_backend(),
     }
 
 

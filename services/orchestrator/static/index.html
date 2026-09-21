@@ -566,6 +566,9 @@ function onActivity(ev) {
     if (ev.safety) said.push('Safety flagged (' + ev.safety_source + '). Escalation is forced on.');
     if (ev.ticket_stands) said.push('Ticket ' + ev.ticket_stands + ' already stands, so escalation was skipped.');
     if (ev.triage_skipped) said.push('Triage skipped: a fault code and nothing else.');
+    else if (ev.backend) said.push(ev.backend === 'jev'
+      ? 'Classified by Jev: four probabilities, thresholds in code.'
+      : 'Classified by the triage agent: gpt-4.1-mini writing JSON.');
     else if (ev.reason && running.length) said.push(ev.reason);
     routeEl.textContent = said.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
@@ -577,6 +580,15 @@ function onActivity(ev) {
     if (ev.state === 'working') {
       mark(ev.name, 'busy');
       step(ev.name, 'turn', 'thinking', 'running');
+    } else if (ev.backend === 'jev') {
+      // Jev answers in one call with four probabilities, so there is no
+      // "working" half to show - and the numbers are the point of showing it.
+      mark('triage', 'done');
+      const p = ev.probabilities || {};
+      const scores = Object.keys(p).map(k => k.replace('needs_', '') + ' ' + p[k].toFixed(2)).join('  ');
+      step('triage', 'turn', 'jev · ' + scores, 'done', ev.ms);
+      const node = parts['triage'];
+      if (node && ev.ms) node.ms.textContent = dur(ev.ms);
     } else {
       const bad = ev.ok === false || ev.state === 'failed';
       mark(ev.name, bad ? 'failed' : 'done');
