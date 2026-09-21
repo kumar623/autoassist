@@ -44,9 +44,10 @@ SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
 echo "==> Federated credentials"
 # Two of them, because the token GitHub sends says something different
 # depending on how the job runs. The deploy job declares
-# `environment: production`, which makes the subject the environment. CI's eval
-# job has no environment, so its subject is the branch. A mismatch here is the
-# cause of "AADSTS70021: No matching federated identity record found".
+# `environment: production`, which makes the subject the environment. The
+# weekly evals workflow (.github/workflows/evals.yml) has no environment, so its
+# subject is the branch. A mismatch here is the cause of "AADSTS70021: No
+# matching federated identity record found".
 add_credential() {
   local name="$1" subject="$2"
   if az ad app federated-credential list --id "$APP_ID" \
@@ -69,8 +70,9 @@ add_credential "github-main"       "repo:$REPO:ref:refs/heads/main"
 
 echo "==> Permissions"
 # Two, both scoped as narrowly as they can be. This identity can push images and
-# change one container app. It cannot touch the search service, the models, the
-# storage account, or anything else in the subscription.
+# change one container app. It cannot touch the search service, the Key Vault,
+# or anything else in the subscription. (The weekly evals need one more role, on
+# the Foundry account only - docs/deploy.md, step 4.)
 az role assignment create \
   --assignee-object-id "$SP_ID" --assignee-principal-type ServicePrincipal \
   --role AcrPush \
