@@ -1100,3 +1100,70 @@ def test_the_diagnostics_prompt_keeps_both_halves_of_the_safety_rule():
     # And the reason the first half cannot simply be softened away: an uncertain
     # symptom is still treated as a safety issue.
     assert "treat it as one" in prompt
+
+
+# ------------------------------------------ one decision path, one record
+
+
+def _failing_triage(monkeypatch):
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "")
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
+        t = TurnResult(agent_name=agent_name, status="failed" if agent_name == "triage" else "completed")
+        if agent_name == "triage":
+            t.error = "run failed: server_error"
+        else:
+            t.answer = "Answer."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+
+
+def test_a_failed_triage_turn_is_not_counted_as_a_parse_failure(monkeypatch):
+    """/metrics' triage_parse_failures counts unparseable JSON. A failed turn
+    parsed nothing, and counting it there hid what actually went wrong."""
+    _failing_triage(monkeypatch)
+    r = _router.handle(None, "my brakes feel soft, can I book for Monday?",
+                       agent_ids={"triage": "t", **IDS})
+    assert not r.decision.parse_failed
+    assert "triage turn failed" in r.decision.reason
+
+
+def test_the_fallback_still_runs_both_keyword_checks(monkeypatch):
+    _failing_triage(monkeypatch)
+    r = _router.handle(None, "my brakes feel soft, can I book for Monday?",
+                       agent_ids={"triage": "t", **IDS})
+    assert r.decision.safety and r.decision.safety_source == "keyword"
+    assert "booking" in r.decision.intents and r.decision.booking_added_by_keyword
+
+
+def test_every_way_of_deciding_is_recorded_once(monkeypatch):
+    """The fast route used to record no routing.decision span at all, so a
+    query over routing decisions silently left out every bare fault code."""
+    recorded = []
+    monkeypatch.setattr(_router, "_record_decision", lambda d, **measured: recorded.append(d))
+    monkeypatch.setattr(_router.tools, "search_service_docs", lambda query, doc_type=None: "")
+
+    def ask(client, agent_id, prompt, timeout=90.0, agent_name="", **_):
+        t = TurnResult(agent_name=agent_name, status="completed")
+        t.answer = '{"intents": ["diagnostics"], "safety": false}' if agent_name == "triage" else "Answer."
+        return t
+
+    monkeypatch.setattr(_router, "ask", ask)
+    _router.handle(None, "P0420", agent_ids={"triage": "t", **IDS})
+    _router.handle(None, "my wipers squeak", agent_ids={"triage": "t", **IDS})
+    assert [d.triage_skipped for d in recorded] == [True, False]
+
+
+def test_both_classifiers_share_one_backstop():
+    """The same message through either classifier gets the same keyword
+    treatment - one function, not two copies kept alike by hand."""
+    from services.orchestrator.jev_triage import Classification
+
+    by_agent = parse_triage('{"intents": ["other"], "safety": false}', "smoke from the bonnet, book me in")
+    by_jev = _router._decision_from_jev(Classification(intents=["other"], safety=False,
+                                                       probabilities={"safety": 0.1}),
+                                        "smoke from the bonnet, book me in")
+    for d in (by_agent, by_jev):
+        assert d.safety and d.safety_source == "keyword"
+        assert d.intents == ["booking"] and d.booking_added_by_keyword

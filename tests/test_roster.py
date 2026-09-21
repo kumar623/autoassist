@@ -78,7 +78,7 @@ def test_an_agent_that_is_not_deployed_is_shown_as_such():
 def test_a_missing_definition_file_does_not_break_the_page(monkeypatch, tmp_path):
     monkeypatch.setattr(roster, "DEFINITIONS", tmp_path)
     roster._ROSTER.clear()
-    assert roster.load() == {"agents": [], "count": 0, "triage_backend": "agent"}
+    assert roster.load() == {"agents": [], "triage_backend": "agent"}
 
 
 def test_a_broken_definition_file_is_skipped(monkeypatch, tmp_path):
@@ -109,33 +109,49 @@ def test_the_search_tool_goes_to_azure_search():
 
 
 def test_booking_tools_say_mcp_when_zoho_is_the_backend(monkeypatch):
-    monkeypatch.setenv("BOOKING_BACKEND", "zoho")
+    monkeypatch.setattr(roster.tools, "BACKEND", roster.zoho_bookings)
     booking = roster.load()["agents"][2]
     assert all("MCP" in t["backend"] for t in booking["tools"])
 
 
 def test_booking_tools_say_local_when_the_file_backend_is_in_use(monkeypatch):
-    """The panel has to follow BOOKING_BACKEND, not assume it."""
-    monkeypatch.setenv("BOOKING_BACKEND", "file")
+    """The panel has to follow where bookings really go, not assume it."""
+    monkeypatch.setattr(roster.tools, "BACKEND", roster.tools.booking)
     booking = roster.load()["agents"][2]
     assert all(t["backend"] == roster.LOCAL_BACKEND for t in booking["tools"])
 
 
 def test_the_backend_is_not_cached_from_an_earlier_call(monkeypatch):
-    """The definitions are cached for ten minutes; the backend is an env var and
-    can change under a running process when the revision changes."""
-    monkeypatch.setenv("BOOKING_BACKEND", "zoho")
+    """The definitions are cached for ten minutes; the backend is looked up on
+    every call, so the cache cannot make the panel say where bookings used to go."""
+    monkeypatch.setattr(roster.tools, "BACKEND", roster.zoho_bookings)
     assert "MCP" in roster.load()["agents"][2]["tools"][0]["backend"]
-    monkeypatch.setenv("BOOKING_BACKEND", "file")
+    monkeypatch.setattr(roster.tools, "BACKEND", roster.tools.booking)
     assert "MCP" not in roster.load()["agents"][2]["tools"][0]["backend"]
+
+
+def test_the_panel_follows_the_backend_bookings_actually_use(monkeypatch):
+    """Read twice, one setting can disagree with itself: tools lower-cased
+    BOOKING_BACKEND and the panel did not, so "Zoho" booked in Zoho while the
+    panel said local."""
+    monkeypatch.setenv("BOOKING_BACKEND", "file")  # what the panel used to read
+    monkeypatch.setattr(roster.tools, "BACKEND", roster.zoho_bookings)
+    assert "MCP" in roster.load()["agents"][2]["tools"][0]["backend"]
+
+
+def test_with_jev_on_the_triage_agent_is_described_as_the_fallback(monkeypatch):
+    monkeypatch.setenv("TRIAGE_BACKEND", "jev")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
+    assert roster.load()["agents"][0]["role"] == roster.TRIAGE_ROLE_WITH_JEV
+    monkeypatch.setenv("TRIAGE_BACKEND", "agent")
+    assert roster.load()["agents"][0]["role"] == roster.ROLE["triage"]
 
 
 # ------------------------------------------------- which classifier is live
 
 
 def test_the_panel_says_which_classifier_is_deciding(monkeypatch):
-    """The choice is the demo. A page that cannot say which one answered cannot
-    show the difference."""
+    """The choice is the demo, so /agents and /metrics both say which is live."""
     monkeypatch.setenv("TRIAGE_BACKEND", "jev")
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test")
     assert roster.load()["triage_backend"] == "jev"
@@ -155,3 +171,14 @@ def test_jev_switched_on_without_a_key_is_reported_as_the_agent(monkeypatch):
 def test_the_backend_defaults_to_the_agent(monkeypatch):
     monkeypatch.delenv("TRIAGE_BACKEND", raising=False)
     assert roster.load()["triage_backend"] == "agent"
+
+
+def test_every_list_of_the_agents_agrees():
+    """Four places name the agents; a rename or a fifth agent has to reach all
+    of them, or the panel, /ready and Jev's questions quietly disagree."""
+    from services.orchestrator import jev_triage
+    from services.orchestrator import router as _router
+
+    assert roster.ORDER == list(_router.AGENTS)
+    assert jev_triage.SPECIALISTS == _router.SPECIALISTS
+    assert set(jev_triage.QUESTIONS) == {f"needs_{s}" for s in _router.SPECIALISTS} | {"safety"}
