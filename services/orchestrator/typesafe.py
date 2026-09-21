@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
 import httpx
 
@@ -46,6 +47,37 @@ OVERLOADED = 529
 # anything this project sends, so a 429 here almost certainly means something is
 # wrong with the account rather than with the traffic.
 THROTTLE_PATIENCE_SECONDS = 2.0
+
+
+# One client for the process, so the TCP and TLS handshake is paid once.
+#
+# Measured from Vizag on 21 September: a fresh connection per call is 1,115ms
+# median, a reused one 391ms. Of the ~725ms saved, curl's own breakdown puts
+# ~260ms in the TCP connect and ~390ms more in the TLS handshake - the endpoint
+# is in the US, and every round trip crosses an ocean. The model's own work is
+# only about 340ms of it.
+#
+# This is why published latencies for Jev (70-500ms) looked unreachable at
+# first: the first measurement here opened a new connection for every request.
+_CLIENT: httpx.Client | None = None
+_CLIENT_LOCK = threading.Lock()
+
+
+def _shared_client() -> httpx.Client:
+    global _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is None:
+            _CLIENT = azure_http.new_client()
+        return _CLIENT
+
+
+def close() -> None:
+    """Drop the shared connection. For tests, and for a clean shutdown."""
+    global _CLIENT
+    with _CLIENT_LOCK:
+        if _CLIENT is not None:
+            _CLIENT.close()
+            _CLIENT = None
 
 
 class TypeSafeUnavailable(Exception):
@@ -95,7 +127,7 @@ def ask(state, questions: dict, http: httpx.Client | None = None, timeout: float
     if not questions:
         raise TypeSafeUnavailable("no questions to ask")
 
-    client = http or azure_http.new_client()
+    client = http or _shared_client()
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     body = {"state": state, "model": model(), "questions": questions}
     host = httpx.URL(ENDPOINT).host

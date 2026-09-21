@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 
-from . import azure_http, limits, telemetry, tools
+from . import azure_http, jev_triage, limits, telemetry, tools
 from .cache import TimedCache
 from .foundry import FoundryAgents
 from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, emit, throttled_turn
@@ -304,6 +304,11 @@ class TriageDecision:
     safety_source: str = "none"  # "triage", "keyword", "both", "none"
     booking_added_by_keyword: bool = False
     triage_skipped: bool = False
+    # Which classifier decided: "agent" (gpt-4.1-mini writing JSON) or "jev"
+    # (four probabilities). Recorded rather than inferred, because the whole
+    # point of offering a choice is being able to say which one answered.
+    backend: str = "agent"
+    probabilities: dict = field(default_factory=dict)
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
@@ -454,6 +459,37 @@ def _parse_triage(text: str, message: str) -> TriageDecision:
         raw=text,
         safety_source=source,
     )
+
+
+def _decision_from_jev(classified, message: str) -> TriageDecision:
+    """Jev's four probabilities as a TriageDecision, through the same backstops.
+
+    SAFETY_WORDS and BOOKING_WORDS still run. They are cheap, they do not care
+    what language they are reading - Jev scored a routine Hinglish complaint at
+    0.75 on the safety question - and everything downstream already trusts that
+    either source firing is enough.
+    """
+    keyword_safety = bool(SAFETY_WORDS.search(message))
+    decision = TriageDecision(
+        intents=list(classified.intents),
+        safety=classified.safety or keyword_safety,
+        registration=classified.registration,
+        reason=classified.reason(),
+        backend="jev",
+        probabilities=classified.probabilities,
+        safety_source=("both" if classified.safety and keyword_safety
+                       else "jev" if classified.safety
+                       else "keyword" if keyword_safety else "none"),
+    )
+    if keyword_safety and not classified.safety:
+        log.warning("the keyword check caught a safety signal Jev scored at %.2f: %r",
+                    classified.probabilities.get("safety", 0.0), message[:120])
+    # The same booking backstop the agent path gets, for the same reason.
+    if BOOKING_WORDS.search(message) and "booking" not in decision.intents:
+        log.warning("Jev missed a booking request the keyword check caught: %r", message[:120])
+        decision.intents = [i for i in decision.intents if i != "other"] + ["booking"]
+        decision.booking_added_by_keyword = True
+    return decision
 
 
 def _agent_ids(client: FoundryAgents) -> dict[str, str]:
@@ -934,6 +970,7 @@ def handle(
             searched=out.searched,
             safety=bool(d and d.safety),
             safety_source=d.safety_source if d else "none",
+            triage_backend=d.backend if d else None,
             total_tokens=out.total_tokens,
             cached=out.cached,
             throttled=out.throttled or None,  # only present when it happened
@@ -988,6 +1025,31 @@ def _handle_inner(
 
     if on_status:
         on_status("reading your message")
+
+    # --- 1a. Jev, if it is switched on and can answer ---
+    # Falls through to the agent for anything it cannot do: no key, the service
+    # unreachable, a question unanswered. A classifier being down is a reason to
+    # use the model that was doing this before, not to fail the customer.
+    if jev_triage.configured():
+        classified = jev_triage.classify(message, history)
+        if classified is not None:
+            decision = _decision_from_jev(classified, message)
+            out.decision = decision
+            log.info("routing (jev): intents=%s safety=%s -> %s | %s",
+                     decision.intents, decision.safety, decision.route(), decision.reason)
+            with telemetry.span("routing.decision") as rs:
+                telemetry.set(rs, backend="jev", intents=decision.intents, route=decision.route(),
+                              safety=decision.safety, safety_source=decision.safety_source,
+                              duration_ms=classified.duration_ms, tokens=classified.tokens,
+                              has_registration=bool(decision.registration),
+                              **{f"p_{k}": v for k, v in classified.probabilities.items()})
+            emit(on_event, kind="agent", name="triage", state="done", ms=classified.duration_ms,
+                 tokens=classified.tokens, ok=True, backend="jev",
+                 probabilities=classified.probabilities)
+            _route_and_answer(client, ids, message, decision, timeout, history, out, started,
+                              on_delta, on_status, on_event)
+            return
+
     try:
         triage_turn = ask(client, ids["triage"], _triage_input(message, history), timeout=timeout,
                           agent_name="triage", on_event=on_event)
@@ -1082,7 +1144,8 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
 
     emit(on_event, kind="route", agents=route, safety=decision.safety,
          safety_source=decision.safety_source, reason=decision.reason,
-         triage_skipped=decision.triage_skipped, ticket_stands=standing)
+         triage_skipped=decision.triage_skipped, ticket_stands=standing,
+         backend=decision.backend, probabilities=decision.probabilities or None)
 
     # Whenever diagnostics is going to run - not only for fault codes.
     prefetched = None

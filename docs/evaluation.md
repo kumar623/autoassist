@@ -816,3 +816,101 @@ category claim rather than a quality one: a model that returns a probability
 instead of prose cannot hallucinate a citation, but it can be confidently wrong,
 which their own FAQ says plainly. Neither claim is about this routing set, which
 is exactly why the comparison was built rather than assumed.
+
+---
+
+# Week 4 — the classifier
+
+### 15. Half of triage's mistakes were one ambiguous sentence
+
+Finding 14 measured triage for the first time and left the causes unexamined.
+Categorised across the 72 labelled routing cases, its 27 errors were not one
+problem but three, and only one of them was the prompt:
+
+| | cause | fixable by rewording? |
+|---|---|---|
+| **14** | returned `["escalation"]` alone on a safety message | **yes** |
+| 4 | false safety alarm raised by the **keyword regex** | no — that is `router.py` |
+| 4 | false safety alarm from the model's own judgement | partly |
+| 5 | dropped or added an intent | partly |
+
+The 14 came from one line of `agents/definitions/triage.json`:
+
+> When safety is true, always include "escalation" in intents, **even if they
+> only asked a simple question**.
+
+"Include" means add. The trailing clause made it read as though escalation
+*replaces* what was already chosen, so "airbag light is on" returned
+`["escalation"]` and the customer was handed to a human **without being told what
+was wrong** — while `_compose` sat there built to put the explanation underneath
+the warning. Rewritten to say ADD, with both worked examples and the failure
+named, deployed, re-measured: **45/72 → 52/72**. Seven cases for one sentence.
+
+The four the keyword net raises cannot be fixed this way at all. `SAFETY_WORDS`
+matches "brake" in *"the brakes **are fine**, it is the air conditioning that is
+broken"* and in *"my brakes **were replaced last week**"*. A regex reads neither
+negation nor past tense, and it overrules the model, so the prompt is not in the
+conversation.
+
+Seven still return escalation alone even after the rewrite. That is the shape of
+findings 1, 6 and 7 again: an instruction competing with another instruction
+loses, repeatedly, and rewording buys less each time.
+
+### 16. A classifier beat the chat model at classifying, and it is a choice
+
+`TRIAGE_BACKEND=jev` routes through four calibrated probabilities instead of a
+model writing JSON. Both were run over the same 72 labelled cases, after the
+prompt fix above, so the comparison is against triage at its best:
+
+| | triage agent | Jev |
+|---|---|---|
+| Routes right | 52/72 | **63/72** |
+| — held-out only | 21/30 | **26/30** |
+| Safety caught | 20/20 | 20/20 |
+| Safety false alarms | 7 | **2** |
+| Latency, median | 2,118ms | **352ms** |
+| Per 1,000 messages | $0.344 | **$0.056** |
+
+Four mistakes were made getting there, and each one flattered the wrong side:
+
+1. **Routing was scored at the safety threshold.** The safety question wants a
+   high bar and the intent questions a low one; forcing them to share a number
+   read as a tie at 25/42 and threw away six correct routes. Two questions with
+   different consequences get two policies — which is the argument for a
+   probability over a boolean, written in this file and then not applied.
+2. **The router's own rules were not applied to Jev's output.** The labels are
+   post-`route()`: safety forces escalation, an empty route falls back to
+   diagnostics. Scoring raw answers against post-rule labels marked three cases
+   wrong that the real system gets right.
+3. **"If unsure, lean towards yes" was removed as a double bias** — the model
+   leaning and the threshold leaning. Measured, that was wrong: it spreads the
+   true cases away from the false ones rather than corrupting them, and removing
+   it made the model miss a case. It asks a legitimately different question,
+   *could this plausibly be unsafe*, which is the right one when missing a brake
+   failure costs more than an extra check. Restored.
+4. **Per-intent thresholds were tuned on the first 42 cases.** They scored 39/42
+   there and 22/30 on thirty cases written afterwards, while a single flat cut
+   scored 37/42 and 26/30. Two cases bought, four lost. The flat cut ships.
+
+Only the held-out column is worth much, and writing those thirty cases is what
+caught mistake 4. They deliberately probe the weaknesses the vendor documents:
+adversarial content, negation read literally, non-English, and long states full
+of irrelevant detail.
+
+**What the numbers do not say.** Jev scored a routine Hinglish complaint —
+"engine se awaaz aa rahi hai", a noise from the engine — at 0.75 on the safety
+question, over the bar. The docs say non-English accuracy is lower and a Vizag
+workshop will get those, so `SAFETY_WORDS` still runs on top of it and
+`safety_source` now reports `jev`, `keyword` or `both`. It also cannot do the
+free-text extraction the agent does: the registration is a regex now, and `date`
+is dropped because booking parses "Monday 21 September" for itself.
+
+**Latency was measured wrong first, and that was ours too.** The first reading
+was 1,215ms, against a published 70–500ms. `curl` put ~650ms of it in the TCP
+and TLS handshake — the endpoint is in the US and every round trip crosses an
+ocean — because the client was being rebuilt per call. One shared connection:
+**1,115ms → 391ms**. The model's own work is about 340ms of that.
+
+Off by default, and anything Jev cannot answer falls back to the agent. A
+classifier being down is a reason to use the model that was doing this before,
+not a reason to fail a customer's message.
