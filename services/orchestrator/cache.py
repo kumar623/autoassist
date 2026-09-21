@@ -3,9 +3,9 @@
 Without it the service pays for the same answer twice: the booking agent asked
 Zoho for the same day's availability twice inside one reply (1.2s each, measured
 20 Sep), and a customer who asks about the same fault code twice pays for the
-same search twice. Four places use it - Zoho availability (zoho_bookings.py),
-document searches (retrieval.py), whole answers (router.py) and the agent
-roster (roster.py).
+same search twice. Five places use it - Zoho availability (zoho_bookings.py),
+document searches (retrieval.py), whole answers (router.py), the agent roster
+(roster.py) and the document library (library.py).
 
 Deliberately plain: a dict, a lock, and an age. No eviction beyond expiry, since
 what is cached here is small and shortlived. Nothing customer-specific goes in -
