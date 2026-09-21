@@ -4,10 +4,14 @@ The shape:
 
     message -> answered at once? (small talk, the answer cache)
             -> who should answer: the message itself (a bare fault code),
-               else Jev's probabilities (TRIAGE_BACKEND=jev),
-               else the triage agent's JSON - with the keyword backstops on top
+               else Jev's probabilities (TRIAGE_BACKEND=jev, or the visitor
+               picked Jev), else the triage agent's JSON - with the keyword
+               backstops on top whichever it was
             -> one or more specialists, concurrently where they can be
             -> one reply
+
+A visitor can pick the classifier for one message, and ask to see the other one
+read it too. The other one is display only: see plan_triage and _compare_with.
 
 Routing is done in CODE, not by an agent calling other agents. That is a
 deliberate choice:
@@ -27,11 +31,13 @@ documents, writing the answer. The orchestrator decides who gets asked.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -163,6 +169,42 @@ TICKET_STANDS = (
 FAULT_CODE = re.compile(r"\b[PBCU][0-9]{4}\b", re.IGNORECASE)
 
 
+# ------------------------------------------------ which classifier, per message
+#
+# What the page may ask for: whatever this server does (TRIAGE_BACKEND), Jev, or
+# the triage agent. "auto" is what every caller got before there was a choice,
+# and still gets without asking - the eval runner and the red team included.
+TRIAGE_CHOICES = ("auto", "jev", "agent")
+
+# Said on the page and in the reply when the classifier that read a message is
+# not the one the visitor picked. Fixed wording on purpose: these go to a public
+# page, and exception text from an HTTP client does not.
+NO_JEV_KEY = "no TypeSafe key is set on this server"
+JEV_DID_NOT_ANSWER = "Jev could not answer"
+
+# $ per million tokens, as the routing eval prices the two classifiers
+# (evals/compare_triage.py, docs/evaluation.md finding 16), so the cost the page
+# shows is worked out the way the finding's $0.056 and $0.344 per 1,000
+# messages were. A test holds the two tables to each other.
+PRICE_PER_MTOK = {"agent": 0.40, "jev": 0.042}
+COST_BASIS = {
+    "jev": "input tokens at $0.042 per million; Jev's output is free",
+    "agent": "all tokens at gpt-4.1-mini's $0.40 per million input rate, as the routing eval prices "
+             "it - a floor rather than a quote, since output is charged too",
+}
+
+# The compared classifier runs beside the answer, never in front of it. Bounded,
+# so a page full of visitors ticking "compare" queues comparisons rather than
+# starting a thread each. The agent gets a shorter leash than a real triage turn:
+# nothing waits on it but a card on the page.
+_COMPARE = ThreadPoolExecutor(max_workers=4, thread_name_prefix="compare")
+COMPARE_TIMEOUT = 20.0
+# How long a finished answer waits for its comparison. It is normally done
+# first - Jev takes ~350ms, the agent ~2s, the specialists 5-8s - and when it
+# is not, the answer goes without it and the page says why.
+COMPARE_GRACE_SECONDS = 5.0
+
+
 # --------------------------------------------------------------- answer cache
 #
 # "What does P0420 mean" has one right answer, it costs 5-9k tokens and 7-9
@@ -211,12 +253,18 @@ class CachedAnswer:
     stored_at: float
 
 
-def cache_key(message: str) -> str | None:
+def cache_key(message: str, decided_by: str | None = None) -> str | None:
     """What this message would be remembered under, or None if it must not be.
 
     Case and spacing vary between people asking the same question; nothing else
     is normalised. In particular no word is removed, because "is it safe to
     drive" and "is it not safe to drive" must never meet in the same bucket.
+
+    `decided_by` names the classifier when a visitor picked one that is not this
+    server's default (TriagePlan.cache_variant). An answer one classifier routed
+    is then never handed to someone who asked for the other, which would make
+    the page's toggle show no difference at all. It sits on a line of its own:
+    the text has had its whitespace collapsed, so no message can reach that key.
     """
     if ANSWERS.seconds <= 0:
         return None
@@ -225,7 +273,7 @@ def cache_key(message: str) -> str | None:
     text = " ".join(message.split()).lower().rstrip("?!. ")
     if not text or len(text) > MAX_CACHED_MESSAGE_CHARS:
         return None
-    return text
+    return f"{decided_by}\n{text}" if decided_by else text
 
 
 def worth_caching(message: str, out: RouterResult, history: list[dict] | None) -> bool:
@@ -319,6 +367,15 @@ class TriageDecision:
     # point of offering a choice is being able to say which one answered.
     backend: str = "agent"
     probabilities: dict = field(default_factory=dict)
+    # What the classifier said on its own, before the keyword net, and which
+    # words the net matched. None when no classifier answered (the fast route,
+    # the fallback). Nothing decides from these - `intents` and `safety` are
+    # still the decision. They are kept so the page can show a Jev safety score
+    # of 0.05 next to the "brake" that escalated the message anyway.
+    classifier_intents: list[str] | None = None
+    classifier_safety: bool | None = None
+    keyword_match: str | None = None
+    booking_match: str | None = None
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
@@ -331,6 +388,16 @@ class TriageDecision:
             chosen = ["diagnostics"]  # 'other' still gets a helpful attempt
 
         return chosen
+
+    def classifier_route(self) -> list[str] | None:
+        """The route the classifier's own answer gave, before the keyword net.
+
+        Through route() itself, so "the net changed the outcome" means the same
+        rules applied to two inputs, not two sets of rules.
+        """
+        if self.classifier_intents is None or self.classifier_safety is None:
+            return None
+        return TriageDecision(intents=list(self.classifier_intents), safety=self.classifier_safety).route()
 
 
 @dataclass
@@ -349,10 +416,25 @@ class RouterResult:
     # throttling had happened on exactly the messages where it had.
     throttled: bool = False
     retry_after: int = 0
+    # What the visitor asked to classify this message with, which classifier
+    # did ("none" when none did), why that differs, and what it made of the
+    # message - see _choice. Set on every path that reaches a reply, so the page
+    # can say "triage was skipped" as plainly as "Jev read it".
+    triage: dict | None = None
+    # The other classifier's reading of the same message, when the visitor
+    # asked to compare. Display only: nothing in this result is decided from it.
+    comparison: dict | None = None
 
     @property
     def cached(self) -> bool:
         return self.cached_from is not None
+
+    @property
+    def comparison_tokens(self) -> int:
+        """What the compared classifier spent. Kept out of total_tokens, which is
+        what the answer cost, and counted apart in /metrics so it is not hidden."""
+        other = (self.comparison or {}).get("other") or {}
+        return int(other.get("tokens") or 0)
 
     @property
     def total_tokens(self) -> int:
@@ -454,7 +536,13 @@ def _with_backstops(decision: TriageDecision, message: str, who: str, classifier
     alike. Either source flagging safety is enough, and everything downstream
     already trusts that. `who` names the classifier in safety_source and logs.
     """
-    keyword_safety = bool(SAFETY_WORDS.search(message))
+    found = SAFETY_WORDS.search(message)
+    keyword_safety = found is not None
+    # Recorded before the net changes anything, so what the classifier said and
+    # what the net did can be shown apart. Nothing below reads them.
+    decision.classifier_intents = list(decision.intents)
+    decision.classifier_safety = classifier_safety
+    decision.keyword_match = found.group(0).lower() if found else None
     decision.safety = classifier_safety or keyword_safety
     decision.safety_source = ("both" if classifier_safety and keyword_safety
                               else who if classifier_safety
@@ -469,7 +557,9 @@ def _with_backstops(decision: TriageDecision, message: str, who: str, classifier
 def _with_booking_backstop(decision: TriageDecision, message: str, who: str) -> TriageDecision:
     """Add booking when the customer plainly asked for an appointment and the
     classifier did not say so. `other` goes: it meant "none of the above"."""
-    if BOOKING_WORDS.search(message) and "booking" not in decision.intents:
+    found = BOOKING_WORDS.search(message)
+    decision.booking_match = found.group(0).lower() if found else None
+    if found and "booking" not in decision.intents:
         log.warning("%s missed a booking request the keyword check caught: %r", who, message[:120])
         decision.intents = [i for i in decision.intents if i != "other"] + ["booking"]
         decision.booking_added_by_keyword = True
@@ -484,15 +574,126 @@ def _keyword_fallback(message: str, reason: str, parse_failed: bool = False) -> 
     looks dangerous, book if it asks to. The keywords need no model, so a brake
     problem still gets the warning when nothing else is working.
     """
-    keyword_safety = bool(SAFETY_WORDS.search(message))
+    found = SAFETY_WORDS.search(message)
+    keyword_safety = found is not None
     decision = TriageDecision(
         intents=["diagnostics"] + (["escalation"] if keyword_safety else []),
         safety=keyword_safety,
         safety_source="keyword" if keyword_safety else "none",
         reason=reason,
         parse_failed=parse_failed,
+        keyword_match=found.group(0).lower() if found else None,
     )
     return _with_booking_backstop(decision, message, "the fallback")
+
+
+@dataclass
+class TriagePlan:
+    """Which classifier reads a message: as the visitor asked, and as it can be done."""
+
+    requested: str = "auto"
+    first: str = "agent"        # the classifier asked first: "jev" or "agent"
+    why: str | None = None      # set when `first` is not what was requested
+    default: str = "agent"      # what "auto" means on this server
+
+    @property
+    def other(self) -> str:
+        """The classifier a comparison runs beside the chosen one."""
+        return "agent" if self.first == "jev" else "jev"
+
+    @property
+    def cache_variant(self) -> str | None:
+        """None when this plan routes as "auto" would, else the classifier.
+
+        Picking the classifier the server already uses changes nothing about the
+        answer, so it shares the default's cache entries; picking the other one
+        does not.
+        """
+        return None if self.first == self.default else self.first
+
+
+def plan_triage(requested: str = "auto") -> TriagePlan:
+    """Resolve the visitor's choice of classifier against this server.
+
+    "auto" is exactly what happened before the choice existed. "jev" needs only a
+    TypeSafe key, not TRIAGE_BACKEND=jev. Without a key the agent reads the
+    message and the plan says why, so the page never shows the agent's answer
+    under Jev's name.
+    """
+    if requested not in TRIAGE_CHOICES:
+        raise ValueError(f"triage must be one of {', '.join(TRIAGE_CHOICES)}")
+    default = "jev" if jev_triage.configured() else "agent"
+    if requested == "auto":
+        return TriagePlan(requested, default, None, default)
+    if requested == "jev" and not jev_triage.available():
+        return TriagePlan(requested, "agent", NO_JEV_KEY, default)
+    return TriagePlan(requested, requested, None, default)
+
+
+def _choice(plan: TriagePlan, used: str, why: str | None = None, reading: dict | None = None) -> dict:
+    """What the visitor asked for, which classifier read the message ("none"
+    when none did), why that is not what they asked for, and what it made of it."""
+    return {"requested": plan.requested, "used": used, "why": why, "reading": reading}
+
+
+def _reading(decision: TriageDecision | None, backend: str, ms: int = 0, prompt_tokens: int = 0,
+             completion_tokens: int = 0, failed: str | None = None) -> dict:
+    """What one classifier made of a message, and what the keyword net then did.
+
+    One shape for the classifier that routed (in the route event) and the one
+    only compared (in the compare event), so the page draws both with the same
+    code and recomputes nothing. `own_*` is the classifier alone; `route` and
+    `safety` are after the net; `keyword_changed` says whether the net made the
+    difference - "how often should brake fluid be changed" at Jev 0.05,
+    escalated because of "brake".
+
+    `decision` is None when a compared classifier did not answer, and `failed`
+    then says why in a few fixed words. Never exception text: this is shown on a
+    public page.
+    """
+    tokens = prompt_tokens + completion_tokens
+    own_route = decision.classifier_route() if decision else None
+    answered = own_route is not None and not failed
+    return {
+        "backend": backend,
+        "ok": answered,
+        "error": None if answered else (failed or "no classifier answered"),
+        "own_intents": decision.classifier_intents if answered else None,
+        "own_safety": decision.classifier_safety if answered else None,
+        "own_route": own_route if answered else None,
+        "probabilities": (decision.probabilities or None) if answered else None,
+        "reason": decision.reason[:200] if answered else None,
+        "keyword_match": decision.keyword_match if decision else None,
+        "booking_match": decision.booking_match if decision else None,
+        "keyword_changed": bool(answered and (own_route != decision.route()
+                                              or decision.classifier_safety != decision.safety)),
+        # What actually happened, which for the classifier that routed is the
+        # keyword fallback when it did not answer: worth showing, it is the route.
+        "route": decision.route() if decision else None,
+        "safety": decision.safety if decision else None,
+        "safety_source": decision.safety_source if decision else None,
+        "ms": int(ms),
+        "tokens": tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        # Ten places: one Jev call costs about $0.00006, and fewer would round
+        # away the figure being shown.
+        "cost_usd": round(tokens * PRICE_PER_MTOK[backend] / 1e6, 10),
+        "cost_basis": COST_BASIS[backend],
+    }
+
+
+def _differences(chosen: dict | None, other: dict | None) -> list[str]:
+    """Where two readings disagree: the classifiers' own answers (own_route,
+    own_safety) and the outcome after the keyword net (route, safety).
+
+    Both levels, because they tell different stories. The net often makes the
+    outcomes agree when the classifiers did not - that is its job - and a card
+    that only compared outcomes would hide the disagreement worth seeing.
+    """
+    if not (chosen and other and chosen["ok"] and other["ok"]):
+        return []
+    return [k for k in ("own_route", "own_safety", "route", "safety") if chosen[k] != other[k]]
 
 
 def _agent_ids(client: FoundryAgents) -> dict[str, str]:
@@ -935,6 +1136,8 @@ def handle(
     on_delta=None,
     on_status=None,
     on_event=None,
+    triage: str = "auto",
+    compare: bool = False,
 ) -> RouterResult:
     """Handle one customer message end to end.
 
@@ -944,7 +1147,13 @@ def handle(
     `history` is the recent conversation as [{"role": "customer"|"assistant",
     "text": ...}], oldest first. Optional: without it, behaviour is exactly the
     single-message behaviour the eval set was scored on.
+
+    `triage` is the visitor's choice of classifier: "auto" (this server's
+    TRIAGE_BACKEND, and what every caller got before there was a choice), "jev"
+    or "agent" - see plan_triage. `compare` also runs the other one on the same
+    message, for the page to show beside it. Nothing is decided from that.
     """
+    plan = plan_triage(triage)
     started = time.time()
     out = RouterResult()
 
@@ -955,13 +1164,15 @@ def handle(
         if canned:
             if on_delta:
                 on_delta(canned)
-            emit(on_event, kind="route", agents=[], reason="small talk, answered without agents")
+            out.triage = _choice(plan, "none", "small talk, answered without agents")
+            emit(on_event, kind="route", agents=[], reason="small talk, answered without agents",
+                 triage=out.triage)
             out.reply = canned
             out.decision = TriageDecision(intents=["other"], reason="small talk, answered without agents")
             out.duration_ms = int((time.time() - started) * 1000)
         else:
             _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta,
-                          on_status, on_event)
+                          on_status, on_event, plan=plan, compare=compare)
         d = out.decision
         telemetry.set(
             req_span,
@@ -978,6 +1189,9 @@ def handle(
             failed_turns=sum(1 for t in out.turns if not t.ok),
             withheld=out.withheld or None,  # only present when something was withheld
             error=out.error,
+            triage_choice=plan.requested,
+            compared=out.comparison is not None or None,  # only present when it happened
+            comparison_tokens=out.comparison_tokens or None,
         )
     return out
 
@@ -993,7 +1207,10 @@ def _handle_inner(
     on_delta=None,
     on_status=None,
     on_event=None,
+    plan: TriagePlan | None = None,
+    compare: bool = False,
 ) -> None:
+    plan = plan or plan_triage()
     ids = agent_ids or _agent_ids(client)
 
     missing = [n for n in AGENTS if n not in ids]
@@ -1006,84 +1223,233 @@ def _handle_inner(
     # --- 0. has someone already asked exactly this? ---
     # Only a first message: with a conversation behind it the answer depends on
     # what came before, and two people's conversations are not the same.
-    key = cache_key(message) if not history else None
+    #
+    # Never for a comparison, in either direction. The visitor asked to watch
+    # two classifiers read the message, and a cached answer was read by neither;
+    # and a comparison must have no way to change what the next visitor is served.
+    key = cache_key(message, plan.cache_variant) if not (history or compare) else None
     if key:
         found = ANSWERS.get(key)
         if found:
             log.info("answered from the cache: %r", key[:80])
+            out.triage = _choice(plan, "none", "an identical question was already answered")
             _serve_cached(found, out, started, on_delta, on_event)
             return
 
-    # --- 1. who should answer: the message itself, then Jev, then the agent ---
+    # --- 1. who should answer: the message itself, then the chosen classifier ---
     decision = fast_route(message, history)
-    measured: dict = {}
+    if decision is not None:
+        # No classifier reads a bare fault code, so there is nothing to choose
+        # between and nothing to compare. The page says the toggle did not apply.
+        out.triage = _choice(plan, "none", decision.reason)
+        _record_decision(decision, choice=out.triage)
+        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
+                          on_status, on_event, cache_as=key)
+        return
 
-    if decision is None:
-        if on_status:
-            on_status("reading your message")
+    # Started before the chosen classifier, so the two read the message at the
+    # same time and the comparison is usually finished long before the answer.
+    comparing = _start_comparison(plan.other, client, ids, message, history, timeout) if compare else None
+    try:
+        classified = _classify(client, ids, message, history, timeout, out, started, plan, on_status, on_event)
+        if classified is None:
+            return  # Azure was throttling; the reply is already written
+        decision, measured = classified
+        _record_decision(decision, choice=out.triage, compared=compare, **measured)
+        _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
+                          on_status, on_event, cache_as=key)
+    finally:
+        if comparing is not None:
+            _finish_comparison(comparing, out, on_event)
+
+
+def _classify(client, ids, message, history, timeout, out, started, plan, on_status=None, on_event=None):
+    """The chosen classifier's decision and what was measured of it - or None
+    when Azure had no quota, and the reply has already been written.
+
+    Jev when the plan says so, the agent when it does not or when Jev could not
+    answer. Either way out.triage says which one read the message, and why when
+    it is not the one the visitor asked for.
+    """
+    if on_status:
+        on_status("reading your message")
+
+    why = plan.why
+    if plan.first == "jev":
         classified = _classify_with_jev(message, history)
         if classified is not None:
             decision = _decision_from_jev(classified, message)
-            measured = {"duration_ms": classified.duration_ms, "tokens": classified.tokens,
-                        **{f"p_{k}": v for k, v in classified.probabilities.items()}}
             emit(on_event, kind="agent", name="triage", state="done", ms=classified.duration_ms,
                  tokens=classified.tokens, ok=True, backend="jev",
                  probabilities=classified.probabilities)
+            out.triage = _choice(plan, "jev", why,
+                                 _reading(decision, "jev", classified.duration_ms, classified.tokens))
+            return decision, {"duration_ms": classified.duration_ms, "tokens": classified.tokens,
+                              **{f"p_{k}": v for k, v in classified.probabilities.items()}}
+        # Said out loud, not only counted in STATS: a reply the agent routed
+        # must not be shown on the page as Jev's.
+        why = JEV_DID_NOT_ANSWER
 
-    if decision is None:
-        triage_turn = _ask_or_throttled(ask, "triage", client, ids["triage"], _triage_input(message, history),
-                                        timeout=timeout, on_event=on_event)
-        out.turns.append(triage_turn)
+    triage_turn = _ask_or_throttled(ask, "triage", client, ids["triage"], _triage_input(message, history),
+                                    timeout=timeout, on_event=on_event)
+    out.turns.append(triage_turn)
+    spent = {"ms": triage_turn.duration_ms, "prompt_tokens": triage_turn.prompt_tokens,
+             "completion_tokens": triage_turn.completion_tokens}
 
-        if triage_turn.throttled:
-            # All four agents share one model deployment. If triage could not get
-            # a token, neither will the specialists, so there is nothing to gain
-            # by finding that out three more times. The safety keywords still
-            # decide the reply: a brake problem gets the warning with no model.
-            out.decision = _keyword_fallback(message, "Azure was throttling; no agent ran")
-            out.reply = _compose([triage_turn], out.decision)
-            out.throttled, out.retry_after = True, int(triage_turn.retry_after)
-            out.duration_ms = int((time.time() - started) * 1000)
-            return
-
-        if triage_turn.ok:
-            decision = parse_triage(triage_turn.answer, message)
-        else:
-            # Not a parse failure - triage parsed nothing, because its turn
-            # failed - so not counted as one in /metrics.
-            log.warning("triage turn failed: %s", triage_turn.error)
-            decision = _keyword_fallback(message, f"triage turn failed ({triage_turn.error}); fell back")
-
-    _record_decision(decision, **measured)
-    _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                      on_status, on_event)
-
-
-def _classify_with_jev(message: str, history: list[dict] | None):
-    """Jev's classification, or None: switched off, or it could not answer.
-
-    None falls through to the agent - no key, the service unreachable, a
-    question unanswered. A classifier being down is a reason to use the model
-    that was doing this before, not to fail the customer.
-    """
-    if not jev_triage.configured():
+    if triage_turn.throttled:
+        # All four agents share one model deployment. If triage could not get
+        # a token, neither will the specialists, so there is nothing to gain
+        # by finding that out three more times. The safety keywords still
+        # decide the reply: a brake problem gets the warning with no model.
+        out.decision = _keyword_fallback(message, "Azure was throttling; no agent ran")
+        out.triage = _choice(plan, "agent", why,
+                             _reading(out.decision, "agent", **spent, failed="Azure had no quota for it"))
+        out.reply = _compose([triage_turn], out.decision)
+        out.throttled, out.retry_after = True, int(triage_turn.retry_after)
+        out.duration_ms = int((time.time() - started) * 1000)
         return None
+
+    if triage_turn.ok:
+        decision = parse_triage(triage_turn.answer, message)
+        failed = "its JSON could not be read" if decision.parse_failed else None
+    else:
+        # Not a parse failure - triage parsed nothing, because its turn
+        # failed - so not counted as one in /metrics.
+        log.warning("triage turn failed: %s", triage_turn.error)
+        decision = _keyword_fallback(message, f"triage turn failed ({triage_turn.error}); fell back")
+        failed = "the triage agent's turn failed"
+    out.triage = _choice(plan, "agent", why, _reading(decision, "agent", **spent, failed=failed))
+    return decision, {}
+
+
+def _classify_with_jev(message: str, history: list[dict] | None, for_routing: bool = True):
+    """Jev's classification, or None when it could not answer.
+
+    None falls through to the agent - the service unreachable, a question
+    unanswered. A classifier being down is a reason to use the model that was
+    doing this before, not to fail the customer. Whether Jev is asked at all is
+    plan_triage's decision, made before this is called.
+    """
     # The same window of history the agent path reads (_recent). The API
     # accepts 20 turns of 8,000 characters; none of that needs to go to a third
     # party to decide who answers a message.
-    return jev_triage.classify(message, (history or [])[-MAX_HISTORY_TURNS:])
+    return jev_triage.classify(message, (history or [])[-MAX_HISTORY_TURNS:], for_routing=for_routing)
 
 
-def _record_decision(decision: TriageDecision, **measured) -> None:
+def _start_comparison(backend: str, client, ids, message, history, timeout) -> tuple[str, Future]:
+    """Ask the other classifier in the background. See _compare_with."""
+    try:
+        # A copy of this request's context, so the comparison's spans (the
+        # agent's turn, the call to Jev) sit under this request's trace in App
+        # Insights rather than each starting a trace of its own.
+        run = contextvars.copy_context().run
+        return backend, _COMPARE.submit(run, _compare_with, backend, client, ids, message, history, timeout)
+    except RuntimeError:  # the pool is shut down: the process is stopping
+        never = Future()
+        never.set_result(_reading(None, backend, failed="the comparison could not start"))
+        return backend, never
+
+
+def _compare_with(backend: str, client, ids, message, history, timeout) -> dict:
+    """The other classifier's reading of the same message, for the page only.
+
+    Nothing routing does reads what this returns: the route, the reply, the
+    tickets and the answer cache are the chosen classifier's alone. It never
+    raises, and it runs through the same backstops, so the page can show what
+    the keyword net would have done to this classifier's answer too.
+    """
+    started = time.time()
+    try:
+        if backend == "jev":
+            if not jev_triage.available():
+                return _reading(None, "jev", failed=NO_JEV_KEY)
+            classified = _classify_with_jev(message, history, for_routing=False)
+            if classified is None:
+                return _reading(None, "jev", int((time.time() - started) * 1000), failed=JEV_DID_NOT_ANSWER)
+            return _reading(_decision_from_jev(classified, message), "jev", classified.duration_ms,
+                            classified.tokens)
+
+        # Its own thread and run, like every turn. No on_event: the panel's
+        # triage card belongs to the classifier that routed.
+        turn = _ask_or_throttled(ask, "triage", client, ids["triage"], _triage_input(message, history),
+                                 timeout=min(timeout, COMPARE_TIMEOUT))
+        spent = {"ms": turn.duration_ms, "prompt_tokens": turn.prompt_tokens,
+                 "completion_tokens": turn.completion_tokens}
+        if turn.throttled:
+            return _reading(None, "agent", **spent, failed="Azure had no quota for it")
+        if not turn.ok:
+            return _reading(None, "agent", **spent, failed="the triage agent's turn failed")
+        decision = parse_triage(turn.answer, message)
+        if decision.parse_failed:
+            return _reading(None, "agent", **spent, failed="its JSON could not be read")
+        return _reading(decision, "agent", **spent)
+    except Exception as e:  # noqa: BLE001 - a comparison must never cost the customer their answer
+        # The type only. The text of an HTTP client's exception can carry a URL,
+        # and a card on a demo page is not worth that risk.
+        log.warning("the %s comparison failed (%s); the answer is unaffected", backend, type(e).__name__)
+        return _reading(None, backend, int((time.time() - started) * 1000), failed="the comparison failed")
+
+
+def _finish_comparison(pending: tuple[str, Future], out: RouterResult, on_event=None) -> None:
+    """Collect the comparison, put it beside the answer, and tell the page.
+
+    Called once the answer is ready, and waits a little rather than for ever:
+    when the comparison is still going, the answer goes without it and the page
+    says why. One still queued is cancelled; one already running finishes and
+    is dropped.
+    """
+    backend, future = pending
+    try:
+        other = future.result(timeout=COMPARE_GRACE_SECONDS)
+    except FutureTimeout:
+        future.cancel()
+        other = _reading(None, backend, failed="still running when the answer was ready")
+    except Exception as e:  # noqa: BLE001 - _compare_with does not raise; this keeps that true if it ever does
+        log.warning("the %s comparison failed (%s); the answer is unaffected", backend, type(e).__name__)
+        other = _reading(None, backend, failed="the comparison failed")
+
+    chosen = (out.triage or {}).get("reading")
+    differences = _differences(chosen, other)
+    out.comparison = {"chosen": chosen, "other": other, "differences": differences}
+    emit(on_event, kind="compare", **out.comparison)
+
+    # Its own span, like routing.decision, so "how often do they disagree, and
+    # on what?" can be asked of App Insights without reading anyone's messages.
+    with telemetry.span("routing.compare") as cs:
+        both = bool(chosen and chosen["ok"] and other["ok"])
+        telemetry.set(
+            cs,
+            chosen=chosen["backend"] if chosen else None,
+            other=backend,
+            other_ok=other["ok"],
+            agrees=not differences if both else None,
+            differences=differences or None,
+            other_ms=other["ms"],
+            other_tokens=other["tokens"],
+        )
+
+
+def _record_decision(decision: TriageDecision, choice: dict | None = None, compared: bool = False,
+                     **measured) -> None:
     """One log line and one routing.decision span, whichever path decided.
 
     A span rather than attributes on the request span, so routing decisions can
     be queried on their own - "how often does the keyword check catch something
     the classifier missed?" is a question worth being able to answer, and it has
     the same answer shape whether the agent, Jev or the fast route decided.
+
+    Only the classifier that routed is recorded here. A comparison has its own
+    span, routing.compare, so the counts the runbook reads from this one still
+    mean one decision per message.
     """
     backend = "none" if decision.triage_skipped else decision.backend
-    log.info("routing (%s): intents=%s safety=%s (%s) -> %s | %s", backend, decision.intents,
+    choice = choice or {}
+    requested = choice.get("requested", "auto")
+    # Why the classifier that decided is not the one asked for. Not set when no
+    # classifier ran: that reason is already the decision's own.
+    fell_back = choice.get("why") if choice.get("used") not in (None, "none") else None
+    log.info("routing (%s%s): intents=%s safety=%s (%s) -> %s | %s", backend,
+             f"; asked for {requested}: {fell_back}" if fell_back else "", decision.intents,
              decision.safety, decision.safety_source, decision.route(), decision.reason)
     with telemetry.span("routing.decision") as rs:
         telemetry.set(
@@ -1099,6 +1465,12 @@ def _record_decision(decision: TriageDecision, **measured) -> None:
             reason=decision.reason[:200],
             has_registration=bool(decision.registration),
             has_date=bool(decision.date),
+            triage_choice=requested,
+            triage_fallback=fell_back,
+            classifier_safety=decision.classifier_safety,
+            keyword_match=decision.keyword_match,
+            booking_match=decision.booking_match,
+            compared=compared or None,  # only present when it happened
             **measured,
         )
 
@@ -1124,8 +1496,12 @@ AGENT_STATUS = {
 
 
 def _route_and_answer(client, ids, message, decision, timeout, history, out, started,
-                      on_delta=None, on_status=None, on_event=None) -> None:
-    """Run the specialists the decision calls for, then compose the reply."""
+                      on_delta=None, on_status=None, on_event=None, cache_as: str | None = None) -> None:
+    """Run the specialists the decision calls for, then compose the reply.
+
+    `cache_as` is the key the reply may be kept under, or None when it must not
+    be kept at all - a conversation, or a comparison.
+    """
     out.decision = decision
 
     # --- 2. specialists ---
@@ -1148,7 +1524,8 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     emit(on_event, kind="route", agents=route, safety=decision.safety,
          safety_source=decision.safety_source, reason=decision.reason,
          triage_skipped=decision.triage_skipped, ticket_stands=standing,
-         backend=decision.backend, probabilities=decision.probabilities or None)
+         backend=decision.backend, probabilities=decision.probabilities or None,
+         triage=out.triage)
 
     # Whenever diagnostics is going to run - not only for fault codes.
     prefetched = None
@@ -1186,7 +1563,7 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     _note_throttling(specialists, out)
     out.duration_ms = int((time.time() - started) * 1000)
 
-    _remember_answer(message, history, out)
+    _remember_answer(message, history, out, cache_as)
 
     log.info(
         "handled in %dms: agents=%s tokens=%d",
@@ -1238,18 +1615,19 @@ def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_del
     out.reply = found.reply
     out.decision = TriageDecision(intents=["diagnostics"], reason="answered from the cache")
     emit(on_event, kind="route", agents=[], cached=True,
-         reason="an identical question was already answered; no agent ran")
+         reason="an identical question was already answered; no agent ran", triage=out.triage)
     if on_delta:
         on_delta(found.reply)  # in one piece: there is nothing to wait for
     out.duration_ms = int((time.time() - started) * 1000)
 
 
-def _remember_answer(message: str, history: list[dict] | None, out: RouterResult) -> None:
-    """Keep this reply for the next person who asks the same thing, if it may be kept."""
-    if not worth_caching(message, out, history):
-        return
-    key = cache_key(message)
-    if not key:
+def _remember_answer(message: str, history: list[dict] | None, out: RouterResult, key: str | None) -> None:
+    """Keep this reply for the next person who asks the same thing, if it may be kept.
+
+    Under the key it was looked up by, which carries the classifier when the
+    visitor picked one other than the server's default - see cache_key.
+    """
+    if not key or not worth_caching(message, out, history):
         return
     ANSWERS.put(key, CachedAnswer(
         reply=out.reply,

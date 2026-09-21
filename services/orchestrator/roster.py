@@ -115,6 +115,10 @@ def load(deployed: dict | None = None) -> dict:
             for a in agents
         ],
         "triage_backend": backend,
+        # Whether the page's Jev toggle can do anything on this server. Picking
+        # it without a key still works - the agent answers and says why - but
+        # the page can say so before anyone clicks.
+        "jev_available": jev_triage.available(),
     }
 
 
