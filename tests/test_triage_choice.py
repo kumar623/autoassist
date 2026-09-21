@@ -218,7 +218,8 @@ def test_the_brake_fluid_question_shows_jev_said_no_and_the_keyword_said_yes(jev
     assert reading["keyword_match"] == "brake"
     assert reading["safety"] is True and reading["safety_source"] == "keyword"
     assert reading["route"] == ["diagnostics", "escalation"]
-    assert reading["keyword_changed"] is True
+    assert reading["keyword_changed"] is True and reading["keyword_added"] == ["safety"]
+    assert reading["safety_cut"] == jev_triage.SAFETY_CUT
     assert out.decision.route() == ["diagnostics", "escalation"], "the policy did not change"
 
 
@@ -238,7 +239,7 @@ def test_a_booking_word_the_classifier_missed_is_reported_as_the_nets_doing(monk
     assert reading["booking_match"] == "book"
     assert reading["own_route"] == ["diagnostics"]
     assert reading["route"] == ["diagnostics", "booking"]
-    assert reading["keyword_changed"] is True
+    assert reading["keyword_changed"] is True and reading["keyword_added"] == ["booking"]
 
 
 def test_when_the_classifier_and_the_net_agree_the_net_changed_nothing(monkeypatch):
@@ -246,7 +247,7 @@ def test_when_the_classifier_and_the_net_agree_the_net_changed_nothing(monkeypat
     out, _ = handle("my brakes feel spongy")
     reading = out.triage["reading"]
     assert reading["keyword_match"] == "brakes" and reading["safety_source"] == "both"
-    assert reading["keyword_changed"] is False
+    assert reading["keyword_changed"] is False and reading["keyword_added"] == []
 
 
 def test_nothing_is_matched_on_an_ordinary_message():

@@ -667,6 +667,14 @@ def _reading(decision: TriageDecision | None, backend: str, ms: int = 0, prompt_
         "booking_match": decision.booking_match if decision else None,
         "keyword_changed": bool(answered and (own_route != decision.route()
                                               or decision.classifier_safety != decision.safety)),
+        # Which of the net's two rules made that difference, so the page can say
+        # "brake" added safety rather than only that something changed.
+        "keyword_added": [rule for rule, added in (
+            ("safety", decision.safety and not decision.classifier_safety),
+            ("booking", decision.booking_added_by_keyword),
+        ) if added] if answered else [],
+        # Jev's bar for its safety probability, so 0.05 can be read against it.
+        "safety_cut": jev_triage.SAFETY_CUT if backend == "jev" else None,
         # What actually happened, which for the classifier that routed is the
         # keyword fallback when it did not answer: worth showing, it is the route.
         "route": decision.route() if decision else None,
