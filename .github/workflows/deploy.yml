@@ -160,10 +160,22 @@ jobs:
             echo "::notice::No TYPESAFE_API_KEY secret; triage stays on the agent."
             exit 0
           fi
-          az containerapp secret set -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
-            --secrets "typesafe-key=$TYPESAFE_API_KEY" --output none
-          echo "have=true" >> "$GITHUB_OUTPUT"
-          echo "TypeSafe key set on the container app (value not shown)."
+          # Jev is optional, so failing to configure it must not stop a deploy.
+          # It did on 21 Sep: the deploy identity can write the container app
+          # but `secret set` also needs managedEnvironments/join/action on the
+          # environment, which it did not have - and every deploy failed here,
+          # for everyone, over a feature nobody had switched on yet. Now it says
+          # why in a warning and the deploy carries on with the agent.
+          if az containerapp secret set -g "$RESOURCE_GROUP" -n "$CONTAINER_APP" \
+               --secrets "typesafe-key=$TYPESAFE_API_KEY" --output none 2> /tmp/secret.err; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+            echo "TypeSafe key set on the container app (value not shown)."
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            # The error names the missing permission and the resource, never the
+            # value: the key only ever travels inside --secrets, which is masked.
+            echo "::warning::Could not set the TypeSafe key on the container app, so triage stays on the agent. $(head -c 400 /tmp/secret.err | tr '\n' ' ')"
+          fi
 
       - name: Deploy
         id: deploy
