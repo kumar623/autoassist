@@ -227,20 +227,20 @@ def test_in_flight_counts_correctly_under_threads():
 # ------------------------------------------------------------ both together
 
 
-def test_hold_lets_a_message_through_and_gives_the_slot_back():
+def test_admit_takes_a_slot_and_release_gives_it_back():
     lim = limits.Limits(limits.Visitors(5, 50), limits.InFlight(1))
-    with lim.hold("a"):
-        assert lim.in_flight.count == 1
+    lim.admit("a")
+    assert lim.in_flight.count == 1
+    lim.release()
     assert lim.in_flight.count == 0
 
 
 def test_a_rate_limited_visitor_is_told_when_to_come_back():
     lim = limits.Limits(limits.Visitors(1, 50), limits.InFlight(4))
-    with lim.hold("a"):
-        pass
+    lim.admit("a")
+    lim.release()
     with pytest.raises(limits.Refused) as e:
-        with lim.hold("a"):
-            pass
+        lim.admit("a")
     assert e.value.status == 429
     assert e.value.reason == "rate"
     assert 0 < e.value.retry_after <= 60
@@ -249,10 +249,9 @@ def test_a_rate_limited_visitor_is_told_when_to_come_back():
 
 def test_a_full_replica_answers_busy_not_rate_limited():
     lim = limits.Limits(limits.Visitors(50, 500), limits.InFlight(1))
-    with lim.hold("a"):
-        with pytest.raises(limits.Refused) as e:
-            with lim.hold("b"):
-                pass
+    lim.admit("a")
+    with pytest.raises(limits.Refused) as e:
+        lim.admit("b")
     assert e.value.status == 503
     assert e.value.reason == "busy"
 
@@ -261,22 +260,27 @@ def test_being_refused_for_our_shortage_does_not_spend_their_budget():
     """They got nothing. Charging them for it would push them towards the rate
     limit because we were full, which is our problem and not theirs."""
     lim = limits.Limits(limits.Visitors(2, 50), limits.InFlight(1))
-    with lim.hold("a"):
-        for _ in range(5):
-            with pytest.raises(limits.Refused):
-                with lim.hold("b"):
-                    pass
-    with lim.hold("b"):  # b has spent nothing yet
-        pass
-    with lim.hold("b"):
-        pass
+    lim.admit("a")
+    for _ in range(5):
+        with pytest.raises(limits.Refused):
+            lim.admit("b")
+    lim.release()
+    lim.admit("b")  # b has spent nothing yet
+    lim.release()
+    lim.admit("b")
+    lim.release()
 
 
-def test_the_slot_comes_back_even_when_the_request_fails():
-    lim = limits.Limits(limits.Visitors(50, 500), limits.InFlight(1))
-    with pytest.raises(ValueError):
-        with lim.hold("a"):
-            raise ValueError("the agent blew up")
+def test_a_refused_message_holds_no_slot():
+    """admit() gives the slot back itself before refusing, so the caller has
+    nothing to release. Releasing anyway would free a slot belonging to someone
+    else's message, still in flight. (That the slot comes back when an admitted
+    message fails is app.py's `finally`, tested in test_api.py.)"""
+    lim = limits.Limits(limits.Visitors(1, 50), limits.InFlight(1))
+    lim.admit("a")
+    lim.release()
+    with pytest.raises(limits.Refused):
+        lim.admit("a")
     assert lim.in_flight.count == 0
 
 
@@ -285,16 +289,15 @@ def test_a_broken_limiter_does_not_break_the_service(monkeypatch):
     customer through rather than taking the service down with it."""
     lim = limits.Limits(limits.Visitors(1, 1), limits.InFlight(4))
     monkeypatch.setattr(lim.visitors, "record", lambda *a, **k: 1 / 0)
-    with lim.hold("a"):
-        pass
+    lim.admit("a")
+    assert lim.in_flight.count == 1
 
 
 def test_refusals_are_counted_for_metrics():
     lim = limits.Limits(limits.Visitors(1, 50), limits.InFlight(1))
-    with lim.hold("a"):
-        pass
+    lim.admit("a")
+    lim.release()
     with pytest.raises(limits.Refused):
-        with lim.hold("a"):
-            pass
+        lim.admit("a")
     assert lim.snapshot()["refused_rate"] == 1
     assert lim.snapshot()["refused_busy"] == 0

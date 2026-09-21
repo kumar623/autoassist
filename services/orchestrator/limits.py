@@ -34,14 +34,10 @@ import logging
 import os
 import threading
 import time
-from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
 
-# Sized for a live demo, not for a script. The longest real conversation the app
-# has had - book a service, a day, a time, a registration, a confirmation - is
-# five messages in about ninety seconds, so a minute limit below about eight
-# would interrupt a customer who types quickly. A script does hundreds.
+
 def setting(name: str, default: int) -> int:
     """A whole number from the environment, which can never stop the app starting.
 
@@ -60,6 +56,10 @@ def setting(name: str, default: int) -> int:
         return default
 
 
+# Sized for a live demo, not for a script. The longest real conversation the app
+# has had - book a service, a day, a time, a registration, a confirmation - is
+# five messages in about ninety seconds, so a minute limit below about eight
+# would interrupt a customer who types quickly. A script does hundreds.
 PER_MINUTE = setting("RATE_LIMIT_PER_MINUTE", 10)
 PER_HOUR = setting("RATE_LIMIT_PER_HOUR", 60)
 
@@ -203,9 +203,8 @@ class Visitors:
         if self.per_hour > OFF and len(times) >= self.per_hour:
             waits.append(times[-self.per_hour] + HOUR - now)
         if self.per_minute > OFF:
-            in_last_minute = sum(1 for t in times if t > now - MINUTE)
-            if in_last_minute >= self.per_minute:
-                recent = [t for t in times if t > now - MINUTE]
+            recent = [t for t in times if t > now - MINUTE]
+            if len(recent) >= self.per_minute:
                 waits.append(recent[-self.per_minute] + MINUTE - now)
         return max(1, int(max(waits) + 0.999)) if waits else 0
 
@@ -236,10 +235,6 @@ class Visitors:
 
         self._seen[key] = collections.deque()
         return self._seen[key]
-
-    def clear(self) -> None:
-        with self._lock:
-            self._seen.clear()
 
 
 def _prune(times: collections.deque, before: float) -> None:
@@ -279,7 +274,7 @@ class InFlight:
 
 
 class Limits:
-    """Both limits together, as one context manager around handling a message."""
+    """Both limits together: admit() before handling a message, release() after."""
 
     def __init__(self, visitors: Visitors | None = None, in_flight: InFlight | None = None):
         self.visitors = visitors or Visitors()
@@ -289,10 +284,12 @@ class Limits:
     def admit(self, key: str) -> None:
         """Let one message from `key` through, or raise Refused.
 
-        Every admit() needs a matching release(), which is what hold() is for.
-        The streaming endpoint cannot use hold(), because it has to answer with
-        a status code before it starts writing the body and only finishes long
-        after the handler returns.
+        An admit() that returns needs exactly one release(), however the message
+        ends - app.py releases in a `finally`, and /chat/stream only once its
+        generator finishes, long after the handler has returned. An admit() that
+        raises Refused holds nothing - a busy refusal never took the slot, and a
+        rate refusal gives it back before raising - so a caller that released as
+        well would free a slot belonging to someone else's message.
 
         The concurrency slot is taken first and the visitor is counted second, so
         that a message refused because the replica is full is not also counted
@@ -317,15 +314,6 @@ class Limits:
 
     def release(self) -> None:
         self.in_flight.release()
-
-    @contextmanager
-    def hold(self, key: str):
-        """admit(), then release() however the request ends."""
-        self.admit(key)
-        try:
-            yield
-        finally:
-            self.release()
 
     def snapshot(self) -> dict:
         """What /metrics reports about the limits."""
