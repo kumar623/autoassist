@@ -34,7 +34,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import library, limits, roster, telemetry
+from . import jev_triage, library, limits, roster, telemetry
 from . import router as routing
 from .foundry import FoundryAgents
 
@@ -191,6 +191,11 @@ def metrics() -> dict:
     m["avg_ms"] = round(m["total_ms"] / answered, 1) if m["requests"] else 0
     m["avg_tokens"] = round(m["total_tokens"] / answered, 1) if m["requests"] else 0
     m.update(LIMITS.snapshot())
+    # Which classifier is live, and whether Jev is actually answering or quietly
+    # handing everything back to the agent.
+    m["triage_backend"] = roster.triage_backend()
+    m["jev_answered"] = jev_triage.STATS["answered"]
+    m["jev_fell_back"] = jev_triage.STATS["fell_back"]
     return m
 
 

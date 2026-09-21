@@ -172,6 +172,15 @@ QUESTIONS = {
 }
 
 
+# How often Jev answered, and how often it could not and the agent did instead.
+#
+# A fallback is silent by design - the customer is answered either way - and
+# that is exactly why it needs counting. With the key revoked or the account's
+# allocation spent, every message would quietly go back to the agent and nothing
+# would say so: a demo of "Jev" answered by gpt-4.1-mini. /metrics reports these.
+STATS = {"answered": 0, "fell_back": 0}
+
+
 @dataclass
 class Classification:
     """What Jev decided, and the numbers it decided it from."""
@@ -232,9 +241,11 @@ def classify(message: str, history: list | None = None) -> Classification | None
         answer = typesafe.ask(state_for(message, history), QUESTIONS)
     except typesafe.TypeSafeUnavailable as e:
         log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
+        STATS["fell_back"] += 1
         return None
     except Exception:  # noqa: BLE001 - a new dependency must not be able to break routing
         log.exception("Jev classification failed unexpectedly; falling back to the triage agent")
+        STATS["fell_back"] += 1
         return None
 
     answers = answer.get("answers") or {}
@@ -243,10 +254,12 @@ def classify(message: str, history: list | None = None) -> Classification | None
         found = typesafe.probability(answers, name)
         if found is None:
             log.warning("Jev did not answer %r; falling back to the triage agent", name)
+            STATS["fell_back"] += 1
             return None
         probabilities[name] = round(found, 3)
 
     intents = [s for s in SPECIALISTS if probabilities[f"needs_{s}"] >= INTENT_CUT]
+    STATS["answered"] += 1
     return Classification(
         # "other" rather than an empty list, so TriageDecision.route() applies its
         # own rule - an unmatched message still gets a diagnostics attempt.

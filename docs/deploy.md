@@ -190,3 +190,34 @@ Two things were wrong with the rollback that followed, both fixed since:
   Prompt changes are the highest-risk change in this system — `docs/evaluation.md`
   findings 4, 7 and 9 are all prompts — so they go out deliberately, with the
   full eval set run afterwards, not as a side effect of a push.
+
+
+## Choosing the triage classifier
+
+Routing is decided either by the triage agent (gpt-4.1-mini writing JSON) or by
+Jev (four probabilities, thresholds in code). See docs/evaluation.md, findings 15
+and 16, for the measurement behind offering the choice.
+
+It is a repository **variable**, so flipping it needs no code change:
+
+    Settings -> Secrets and variables -> Actions -> Variables -> TRIAGE_BACKEND
+
+| value | what routes |
+|---|---|
+| `agent` (default) | the triage agent |
+| `jev` | Jev, falling back to the agent for anything it cannot answer |
+
+Jev also needs the repository **secret** `TYPESAFE_API_KEY`. The deploy copies it
+onto the container app as a secret on every run and reads it through
+`secretref`, so GitHub is the one place to rotate it and the value never appears
+in `az containerapp show`. Without the secret the deploy stays on the agent and
+says so, rather than failing.
+
+The change takes effect on the next deploy. To flip it immediately, without one:
+
+    az containerapp update -g Ai_solution -n ca-autoassist --set-env-vars TRIAGE_BACKEND=agent
+
+**Check it is really answering.** A fallback is silent - the customer gets a
+reply either way - so a revoked key would quietly send everything back to the
+agent. `/metrics` reports `triage_backend`, `jev_answered` and `jev_fell_back`;
+if `jev_fell_back` is climbing, Jev is configured but not the thing deciding.
