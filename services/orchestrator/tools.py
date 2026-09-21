@@ -13,9 +13,11 @@ text. That is what lets us guarantee what reaches the model.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
+import threading
 from typing import Callable
 
 from . import booking, retrieval, zoho_bookings
@@ -106,6 +108,124 @@ def look_up_booking(reference: str, registration: str) -> str:
 
 def raise_ticket(summary: str, urgency: str = "normal", registration: str = "") -> str:
     return json.dumps(booking.create_ticket(summary, urgency, registration), indent=2)
+
+
+class OneTicket:
+    """The one ticket a conversation may have, shared by every agent answering one message.
+
+    From the live app, 21 Sep. "How often should brake fluid be changed?" went to
+    diagnostics and escalation, and each called raise_ticket: TK-709113 and
+    TK-519169, two advisors for one question, and the customer was told only the
+    second. On the next message escalation was rightly skipped, because
+    TK-519169 was in the conversation - but diagnostics raised TK-879967 itself
+    and said so, under the router's own line that TK-519169 still stood. Over
+    seven days diagnostics raised five tickets and escalation four. Skipping
+    escalation could never have fixed that: the rule has to sit on the tool,
+    where every call to it arrives, whoever makes it.
+
+    So every raise_ticket call for one message comes through one of these:
+
+      - a ticket already stands in the conversation: that reference, nothing new
+      - someone else owns the ticket in this reply: nothing, and they are told why
+      - one was already raised for this message: the same reference, nothing new
+      - otherwise the ticket is raised, and becomes the one for this message
+
+    The router makes one per customer message and passes it down to each turn by
+    hand, the way on_event goes. Not a module global, which two customers' messages
+    would share, and not a contextvar: the specialists run in a thread pool,
+    which does not carry a contextvar into its threads unless every submit copies
+    the context, and the one submit that forgot would bring the duplicates back
+    without a sound. An argument is on the page, in every signature it passes
+    through.
+
+    The lock is held while the ticket is written, not only while the reference is
+    read. Diagnostics and booking run at the same time, and a second caller that
+    did not wait would find nothing yet and raise its own. Only this message's
+    own threads ever wait on it.
+    """
+
+    def __init__(self, standing: str | None = None, owner: str | None = None):
+        # Given to the customer on an earlier turn - router.ticket_already_raised.
+        self.standing = standing
+        # The only agent that may raise one in this reply: escalation, when it is
+        # on the route. It writes the handover summary; nobody else's will do.
+        self.owner = owner
+        self.raised: str | None = None  # raised while answering this message
+        self.confirmation = ""  # booking.create_ticket's own words about it
+        self.asked_by: list[str] = []  # every call, granted or not, in order
+        self._lock = threading.Lock()
+
+    @property
+    def reference(self) -> str | None:
+        """This conversation's ticket, if it has one: standing, or raised just now."""
+        return self.standing or self.raised
+
+    @property
+    def speaker(self) -> str | None:
+        """Who tells the customer about the ticket in this reply.
+
+        "router" when one already stands - it is one sentence of fact, written in
+        code (router.TICKET_STANDS). The owner when there is one. None when any
+        agent may raise it, because then whoever did is the only one who knows.
+        """
+        if self.standing:
+            return "router"
+        return self.owner
+
+    def raise_ticket(self, asked_by: str, /, summary: str, urgency: str = "normal",
+                     registration: str = "") -> str:
+        """raise_ticket for `asked_by`, subject to the rules above.
+
+        `asked_by` is positional-only so that no argument a model invents can
+        claim to be someone else.
+        """
+        with self._lock:
+            self.asked_by.append(asked_by)
+            refused = self._refusal(asked_by)
+            if refused is not None:
+                log.info("raise_ticket from %s: nothing raised (%s)", asked_by or "an agent",
+                         refused.get("reference") or f"left to {self.owner}")
+                return json.dumps(refused, indent=2)
+            made = booking.create_ticket(summary, urgency, registration)
+            if made.get("ok") and made.get("reference"):
+                self.raised = made["reference"]
+                self.confirmation = made.get("message") or f"Ticket {self.raised} raised."
+            return json.dumps(made, indent=2)
+
+    def _refusal(self, asked_by: str) -> dict | None:
+        """What to tell the caller instead of raising a ticket, or None to raise one.
+
+        Each is worded for the model reading it. A tool's output is a second
+        prompt and it wins (finding 7), so this is the place to say what to tell
+        the customer - it is read at the moment the model is deciding.
+        """
+        if self.standing:
+            return {
+                "ok": True,
+                "reference": self.standing,
+                "already_raised": True,
+                "message": f"No new ticket: {self.standing} already stands for this conversation, and a "
+                           "service advisor is already due to call. The reply tells the customer so. Do "
+                           "not say you raised a ticket.",
+            }
+        if self.owner and asked_by != self.owner:
+            return {
+                "ok": True,
+                "reference": None,
+                "left_to": self.owner,
+                "message": "No ticket raised by you, and none is needed: a colleague is arranging the "
+                           "service advisor's call in this same reply and gives the customer the "
+                           "reference. Do not raise a ticket and do not mention one.",
+            }
+        if self.raised:
+            return {
+                "ok": True,
+                "reference": self.raised,
+                "already_raised": True,
+                "message": f"No second ticket: {self.raised} was already raised while answering this "
+                           "message. It is the only ticket reference to give the customer.",
+            }
+        return None
 
 
 HANDLERS: dict[str, Callable[..., str]] = {
@@ -289,15 +409,21 @@ def schemas_for(names: list[str]) -> list[dict]:
     return [SCHEMAS[n] for n in names]
 
 
-def execute(name: str, arguments: str | dict) -> str:
+def execute(name: str, arguments: str | dict, tickets: OneTicket | None = None, asked_by: str = "") -> str:
     """Run a tool call and always return a string.
 
     Never raises. A tool that blows up must hand the model a readable error so
     it can tell the customer something honest, rather than killing the run.
+
+    `tickets` is the message's OneTicket, and `asked_by` the agent calling.
+    With one, raise_ticket goes through it; without one - a direct call, or a
+    test - it raises a ticket as it always did.
     """
     handler = HANDLERS.get(name)
     if handler is None:
         return f"ERROR: no such tool '{name}'."
+    if name == "raise_ticket" and tickets is not None:
+        handler = functools.partial(tickets.raise_ticket, asked_by)
 
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})

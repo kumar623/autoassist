@@ -334,7 +334,7 @@ def test_prompts_are_built_before_any_thread_starts(monkeypatch):
     """
     seen = []
 
-    def spy(specialist, message, decision, so_far, history=None, prefetched=None):
+    def spy(specialist, message, decision, so_far, history=None, prefetched=None, **_):
         seen.append((specialist, len(so_far)))
         return f"prompt for {specialist}"
 
@@ -352,7 +352,7 @@ def test_prompts_are_built_before_any_thread_starts(monkeypatch):
 def test_escalation_sees_what_the_earlier_wave_said(monkeypatch):
     seen = {}
 
-    def spy(specialist, message, decision, so_far, history=None, prefetched=None):
+    def spy(specialist, message, decision, so_far, history=None, prefetched=None, **_):
         seen[specialist] = [t.agent_name for t in so_far]
         return f"prompt for {specialist}"
 

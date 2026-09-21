@@ -115,7 +115,7 @@ The same is available without the page: `POST /chat` with `"triage": "jev"`
 | Agent | Job | Tools |
 |---|---|---|
 | triage | Classify intent, flag safety. Returns JSON, never prose. | none |
-| diagnostics | Fault codes, warning lights, maintenance intervals | `search_service_docs`, `raise_ticket` |
+| diagnostics | Fault codes, warning lights, maintenance intervals | `search_service_docs` |
 | booking | Find, book, move, cancel and confirm slots, in Zoho Bookings | `get_available_slots`, `book_service_slot`, `move_service_booking`, `cancel_service_booking`, `look_up_booking` |
 | escalation | Hand over to a human with a written summary | `raise_ticket` |
 
@@ -339,12 +339,15 @@ by hand and is not under its management (decision 006).
   The triage agent was then the largest single cost at 2.8s for ~50 tokens of
   JSON; Jev, which routes the live app, takes about 350ms at the median. A
   single specialist's answer is streamed as it is written; when several answer,
-  or the message is safety-flagged, the reply arrives in one piece.
+  the message is safety-flagged, or a ticket already stands in the conversation,
+  the reply arrives in one piece.
 - **Conversation memory is the last six turns, kept by the page.** The server
   holds no session, so any replica can answer any message; reload the page and
   the conversation is gone. Booking and escalation see the recent turns.
   Diagnostics sees only what the customer said earlier, never earlier answers,
-  so every question is searched afresh (finding 3).
+  so every question is searched afresh (finding 3). The one thing kept longer
+  is the conversation's ticket reference, which the page sends beside the
+  history so that a conversation still has one ticket after six turns.
 - **Bookings are in Zoho Bookings** (`BOOKING_BACKEND=zoho`), through Zoho's MCP
   server: real appointments in the workshop's calendar, and Zoho emails the
   customer. The JSON file remains as the default and for offline tests. See
