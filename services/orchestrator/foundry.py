@@ -1,18 +1,21 @@
 """Azure AI Foundry Agent Service, over plain HTTPS.
 
-Replaces the azure-ai-agents SDK in the running service. It needs nine
-operations, and each one here sends what the SDK sent - recorded from the SDK's
-own traffic on 19 Sep 2026 against the live project, then reproduced:
+Replaces the azure-ai-agents SDK in the running service. These are the calls
+the service makes:
 
     GET    /assistants                                  list agents (paged)
-    POST   /threads                                     {}
-    POST   /threads/{thread}/messages                   {"role": "user", "content": ...}
-    POST   /threads/{thread}/runs                       {"assistant_id": ...}
+    POST   /threads/runs                                {"assistant_id": ..., "thread": {"messages": [...]}}
     GET    /threads/{thread}/runs/{run}
     POST   /threads/{thread}/runs/{run}/submit_tool_outputs   {"tool_outputs": [...]}
     POST   /threads/{thread}/runs/{run}/cancel
     GET    /threads/{thread}/messages                   newest first
     DELETE /threads/{thread}
+
+Each of them but POST /threads/runs sends what the SDK sent - recorded from the
+SDK's own traffic on 19 Sep 2026 against the live project, then reproduced.
+POST /threads/runs came the day after: it makes the thread, its message and the
+run in one round trip, where the SDK took three. The two POSTs that start or
+continue a run also have a streamed form: the same body with "stream": true.
 
 Every path is under PROJECT_ENDPOINT and carries api-version=v1, the version
 the SDK used. Responses are plain dicts in the shapes documented in
@@ -96,24 +99,15 @@ class FoundryAgents:
 
     # ------------------------------------------------------------ threads and runs
 
-    def create_thread(self) -> dict:
-        return self._call("POST", "/threads", json={})
-
     def delete_thread(self, thread_id: str) -> dict:
         return self._call("DELETE", f"/threads/{thread_id}")
 
-    def create_message(self, thread_id: str, content: str, role: str = "user") -> dict:
-        return self._call("POST", f"/threads/{thread_id}/messages", json={"role": role, "content": content})
-
-    def list_messages(self, thread_id: str, limit: int = 20) -> list[dict]:
+    def list_messages(self, thread_id: str) -> list[dict]:
         """Newest first, which is also the API's default."""
-        page = self._call("GET", f"/threads/{thread_id}/messages", params={"order": "desc", "limit": limit})
+        page = self._call("GET", f"/threads/{thread_id}/messages", params={"order": "desc", "limit": 20})
         return page.get("data") or []
 
-    def create_run(self, thread_id: str, agent_id: str) -> dict:
-        return self._call("POST", f"/threads/{thread_id}/runs", json={"assistant_id": agent_id})
-
-    def create_thread_and_run(self, agent_id: str, content: str, role: str = "user") -> dict:
+    def create_thread_and_run(self, agent_id: str, content: str) -> dict:
         """Thread, message and run in one request instead of three.
 
         Three round trips to South India cost roughly 0.5s of every reply, and
@@ -122,7 +116,7 @@ class FoundryAgents:
         """
         return self._call("POST", "/threads/runs", json={
             "assistant_id": agent_id,
-            "thread": {"messages": [{"role": role, "content": content}]},
+            "thread": {"messages": [{"role": "user", "content": content}]},
         })
 
     def get_run(self, thread_id: str, run_id: str) -> dict:
@@ -173,7 +167,6 @@ class FoundryAgents:
             with self._http.stream("POST", url, params=params, headers=headers, json=body) as r:
                 if r.status_code == 401 and attempt == 1:
                     self._token = None  # force a new one, then try again
-                    r.close()
                     continue
                 if r.status_code >= 400:
                     r.read()

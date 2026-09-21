@@ -46,20 +46,11 @@ class FakeFoundry:
         self.deleted = []
         self.messages = []
 
-    def create_thread(self):
-        return {"id": "thread_1"}
-
-    def create_message(self, thread_id, content, role="user"):
-        self.messages.append(content)
-
     def _next(self):
         """The next state; the last one repeats, like a run that stays put."""
         return self.states.pop(0) if len(self.states) > 1 else self.states[0]
 
-    def create_run(self, thread_id, agent_id):
-        return self._next()
-
-    def create_thread_and_run(self, agent_id, content, role="user"):
+    def create_thread_and_run(self, agent_id, content):
         """One call: thread, message and run. What ask() uses."""
         self.messages.append(content)
         return {**self._next(), "thread_id": "thread_1"}
@@ -73,7 +64,7 @@ class FakeFoundry:
     def cancel_run(self, thread_id, run_id):
         self.cancelled = True
 
-    def list_messages(self, thread_id, limit=20):
+    def list_messages(self, thread_id):
         return [
             {"role": "assistant", "content": [{"type": "text", "text": {"value": self.answer, "annotations": []}}]},
             {"role": "user", "content": [{"type": "text", "text": {"value": "q", "annotations": []}}]},
@@ -178,7 +169,7 @@ def test_unparseable_tool_arguments_are_recorded_not_fatal():
 
 def test_the_thread_is_deleted_even_when_the_run_blows_up():
     class Broken(FakeFoundry):
-        def create_thread_and_run(self, agent_id, content, role="user"):
+        def create_thread_and_run(self, agent_id, content):
             raise RuntimeError("Azure is down")
 
     c = Broken([])
