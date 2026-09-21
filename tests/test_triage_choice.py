@@ -712,18 +712,47 @@ def test_a_yes_reaches_escalation_when_jev_could_not_answer(jev_key, monkeypatch
     assert out.decision.advisor_call_accepted
 
 
-def test_a_yes_reaches_escalation_with_compare_on_and_the_compared_one_is_left_alone(jev_key, monkeypatch):
+@pytest.mark.parametrize("choice, compared_backend", [("auto", "jev"), ("jev", "agent")])
+def test_a_yes_reaches_escalation_with_compare_on_and_the_compared_one_is_left_alone(
+        jev_key, monkeypatch, choice, compared_backend):
     """The call is the router's to add, not either classifier's, so it is no
-    difference between them: both read "yes please" as nothing in particular."""
+    difference between them: both read "yes please" as nothing in particular -
+    whichever of the two is the one only compared."""
     monkeypatch.setattr(typesafe, "ask", jev_says())
     monkeypatch.setattr(_router, "ask", agents(intents=("other",)))
-    out, seen = handle("yes please", history=OFFERED, compare=True)
+    out, seen = handle("yes please", history=OFFERED, compare=True, triage=choice)
 
     assert "escalation" in _router.ask.called
     compared = the(seen, "compare")
+    assert compared["other"]["backend"] == compared_backend
     assert "escalation" not in compared["other"]["route"]
     assert "escalation" not in compared["chosen"]["route"]
     assert compared["differences"] == []
+
+
+@pytest.mark.parametrize("message", ["thanks", "hello"])
+def test_a_reply_no_agent_wrote_still_reports_the_ticket(message):
+    """Small talk never reaches the router's ticket desk. A caller that keeps
+    each response's ticket would lose it on "thanks" and raise a second one on
+    its next safety message."""
+    out, _ = handle(message, ticket="TK-555555")
+    assert out.ticket == "TK-555555"
+
+
+def test_a_throttled_reply_still_reports_the_ticket(monkeypatch):
+    from services.orchestrator import azure_http
+
+    def throttled(*a, **k):
+        raise azure_http.Throttled(429, "quota", "POST", "https://x/runs", retry_after=20)
+
+    monkeypatch.setattr(_router, "ask", throttled)
+    out, _ = handle("my wipers squeak", ticket="TK-555555", triage="agent")
+    assert out.throttled and out.ticket == "TK-555555"
+
+
+def test_a_ticket_that_is_not_a_reference_is_not_reported_back():
+    out, _ = handle("thanks", ticket="<script>")
+    assert out.ticket is None
 
 
 # -------------------------------------------------------------- telemetry

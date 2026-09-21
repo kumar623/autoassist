@@ -1463,6 +1463,12 @@ def handle(
         else:
             _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta,
                           on_status, on_event, plan=plan, compare=compare, ticket=ticket)
+        # Every reply reports the conversation's ticket, including the ones no
+        # agent wrote - small talk, a throttled request, a missing agent. A
+        # caller that keeps each response's `ticket` would otherwise lose it on
+        # "thanks", and its next safety message would raise a second one.
+        if out.ticket is None:
+            out.ticket = _standing_ticket(ticket, history)
         d = out.decision
         telemetry.set(
             req_span,
@@ -1488,6 +1494,15 @@ def handle(
             comparison_tokens=out.comparison_tokens or None,
         )
     return out
+
+
+def _standing_ticket(ticket: str | None, history: list[dict] | None) -> str | None:
+    """The conversation's ticket: the reference the page kept, else one the
+    history still shows. The page's comes first - it is the one this server
+    reported, and it is still there when the history has moved past the reply
+    that gave it."""
+    known = ticket if ticket and TICKET_REFERENCE.fullmatch(ticket) else None
+    return known or ticket_already_raised(history)
 
 
 def _handle_inner(
@@ -1865,11 +1880,8 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     # A human has already been called about this conversation. Calling them again
     # every turn is what the live app did on 20 Sep - see TICKET_REFERENCE.
     # Looked for on every message, not only when escalation is routed: any
-    # agent with raise_ticket has to be turned away while it stands. The
-    # reference the page kept comes first: it is the one this server reported,
-    # and it is still there when the history has moved past the reply that gave it.
-    known = ticket if ticket and TICKET_REFERENCE.fullmatch(ticket) else None
-    standing = known or ticket_already_raised(history)
+    # agent with raise_ticket has to be turned away while it stands.
+    standing = _standing_ticket(ticket, history)
     escalation_skipped = bool(standing) and "escalation" in route
     if escalation_skipped:
         log.info("escalation skipped: ticket %s already stands for this conversation", standing)
