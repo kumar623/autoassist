@@ -45,11 +45,13 @@ def test_triage_has_no_tools_and_returns_json():
     assert triage["returns"] == "JSON"
 
 
-def test_diagnostics_can_hand_over_as_well_as_search():
-    """raise_ticket under diagnostics is not a mistake: it hands over when the
-    library does not cover something important."""
-    diagnostics = roster.load()["agents"][1]
-    assert {t["name"] for t in diagnostics["tools"]} == {"search_service_docs", "raise_ticket"}
+def test_only_escalation_can_raise_a_ticket():
+    """Diagnostics had raise_ticket as well, and on the live app raised a ticket
+    beside escalation's on most safety messages (21 Sep). It searches; escalation
+    hands over."""
+    agents = {a["name"]: {t["name"] for t in a["tools"]} for a in roster.load()["agents"]}
+    assert agents["diagnostics"] == {"search_service_docs"}
+    assert [name for name, tools_ in agents.items() if "raise_ticket" in tools_] == ["escalation"]
 
 
 def test_every_tool_explains_itself():

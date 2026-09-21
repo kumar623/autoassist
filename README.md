@@ -115,7 +115,7 @@ The same is available without the page: `POST /chat` with `"triage": "jev"`
 | Agent | Job | Tools |
 |---|---|---|
 | triage | Classify intent, flag safety. Returns JSON, never prose. | none |
-| diagnostics | Fault codes, warning lights, maintenance intervals | `search_service_docs`, `raise_ticket` |
+| diagnostics | Fault codes, warning lights, maintenance intervals | `search_service_docs` |
 | booking | Find, book, move, cancel and confirm slots, in Zoho Bookings | `get_available_slots`, `book_service_slot`, `move_service_booking`, `cancel_service_booking`, `look_up_booking` |
 | escalation | Hand over to a human with a written summary | `raise_ticket` |
 

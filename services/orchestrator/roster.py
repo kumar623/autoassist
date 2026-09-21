@@ -7,8 +7,10 @@ tool schemas the agents are actually given - not written out again here, because
 a hand-copied panel is a panel that quietly goes out of date and then tells the
 interviewer something that is not true.
 
-`raise_ticket` appearing under diagnostics is not a mistake: it can hand over
-when the library does not cover something important.
+`raise_ticket` appears under escalation only. Diagnostics had it too, and on the
+live app raised tickets nobody had asked for, alongside escalation's own (21
+Sep) - see router.TICKET_REFERENCE. It now offers an advisor's call instead,
+and escalation makes it when the customer says yes.
 """
 
 from __future__ import annotations
