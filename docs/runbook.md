@@ -164,28 +164,54 @@ text and find the document it came from.
 
 ### One ticket per conversation
 
-A conversation gets one ticket, however many messages it runs to and however
-many agents ask. On 21 September one brake conversation raised three: diagnostics
-and escalation each raised one for the first message, and diagnostics raised
-another for the next, under the reply's own line that the first still stood.
-Three things now hold the rule:
+A conversation gets one ticket, however many agents ask. On 21 September one
+brake conversation raised three: diagnostics and escalation each raised one for
+the first message, and diagnostics raised another for the next, under the
+reply's own line that the first still stood. Four things now hold the rule:
 
 - **`tools.OneTicket`.** Every `raise_ticket` call for one message goes through
   the same one, including calls from specialists running at the same time. While
-  a ticket stands in the conversation (`router.ticket_already_raised`), any call
-  is given that reference and nothing is raised. When escalation is on the
-  route, only escalation may raise one. Otherwise the first call raises it and
-  every later call gets the same reference.
+  a ticket stands in the conversation, any call is given that reference and
+  nothing is raised. When escalation is on the route, only escalation may raise
+  one. Otherwise the first call raises it and every later call gets the same
+  reference.
+- **The page remembers the ticket.** The server keeps no conversation, so "a
+  ticket stands" means the page said so. Every reply reports the conversation's
+  ticket (`ticket` in the response); the page keeps it and sends it back with
+  each message (`ticket` in the request, beside `triage` and `compare`), next to
+  the six turns of history rather than in them. Read from the history alone
+  (`router.ticket_already_raised`), the reference was gone three exchanges after
+  it was given, and the next brake message raised a second ticket. The history
+  is still read, for callers that send nothing else. A message sent with a
+  ticket is never answered from the answer cache or kept in it, even with no
+  history: the reply can name the ticket, and the next visitor handed it would
+  hold someone else's.
 - **One voice for the ticket.** When a ticket stands, the router says so in its
   own sentence (`router.TICKET_STANDS`). When escalation raised it, escalation
-  says it. Whatever any other agent says about a ticket is dropped from the
-  reply (`router._leave_the_ticket_to`), and a ticket the reply forgot to name
-  is named, so the next message can find it.
+  says it. Whatever any other agent says about a ticket - or about an advisor's
+  call - is dropped from the reply (`router._leave_the_ticket_to`). If that took
+  the do-not-drive warning with it on a safety message, the router puts its own
+  warning back at the top (`router._keep_the_warning`). A ticket the reply forgot
+  to name, or named with a wrong digit, is named correctly, so the next message
+  can find it.
 - **Only escalation has `raise_ticket`.** Diagnostics offers an advisor's call
-  instead, and escalation makes it when the customer says yes. This lives in
+  instead. A short yes to that offer is sent to escalation by code
+  (`router._with_accepted_offer`), because neither classifier is asked about
+  accepting one; escalation then raises the ticket. It runs after whichever
+  classifier routed the message - Jev, the LLM, or the keyword fallback - and
+  never on the one only compared. On the comparison card "Route decided" is the
+  classifier and the keyword net, so escalation added for a yes shows in the
+  route line above the card, not in it. The offer lives in
   `agents/definitions/diagnostics.json`, so it only takes effect when the agents
-  are redeployed (`make agents`, which the app deploy does not do); until then the first two
-  hold the rule on their own.
+  are redeployed (`make agents`, which the app deploy does not do); until then
+  the others hold the rule on their own. The routing eval set has no case for
+  this yes yet, so it is covered by unit tests only.
+
+Where it can still fail. A reply that never reaches the page - the connection
+dropped before the answer finished - leaves the page without the reference,
+because the server finishes the message regardless and the page only keeps what
+arrives; the next message can then raise a second ticket. A reloaded page is
+a new conversation, with no ticket of its own until it raises one.
 
 Who calls `raise_ticket`. Once diagnostics is redeployed, only `escalation`
 should appear here.

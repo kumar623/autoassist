@@ -9,8 +9,9 @@ interviewer something that is not true.
 
 `raise_ticket` appears under escalation only. Diagnostics had it too, and on the
 live app raised tickets nobody had asked for, alongside escalation's own (21
-Sep) - see router.TICKET_REFERENCE. It now offers an advisor's call instead,
-and escalation makes it when the customer says yes.
+Sep) - see router.TICKET_REFERENCE. It now offers an advisor's call instead.
+A yes to that offer is sent to escalation in code (router._with_accepted_offer),
+and escalation raises the ticket.
 """
 
 from __future__ import annotations
