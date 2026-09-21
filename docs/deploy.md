@@ -207,11 +207,18 @@ It is a repository **variable**, so flipping it needs no code change:
 | `agent` (default) | the triage agent |
 | `jev` | Jev, falling back to the agent for anything it cannot answer |
 
-Jev also needs the repository **secret** `TYPESAFE_API_KEY`. The deploy copies it
-onto the container app as a secret on every run and reads it through
-`secretref`, so GitHub is the one place to rotate it and the value never appears
-in `az containerapp show`. Without the secret the deploy stays on the agent and
-says so, rather than failing.
+Jev also needs its key, and **every key lives on the container app**, next to the
+OpenAI, Search and Zoho ones: Container App -> Settings -> Secrets, named
+`typesafe-key`. The deploy only references it, through `secretref`, and never
+writes it. That was learned the hard way on 21 September - copying the key
+across from a GitHub secret needed the deploy identity to hold
+`managedEnvironments/join/action`, and after that was granted it failed on a
+further linked scope. Each step that writes a secret asks for more power for the
+identity GitHub logs in as; reading one needs nothing it does not already have.
+
+So GitHub holds only the three OIDC identifiers it needs to log in, none of which
+is a password. If `TRIAGE_BACKEND=jev` but the app has no `typesafe-key` secret,
+the deploy stays on the agent and says so in a warning, rather than failing.
 
 The change takes effect on the next deploy. To flip it immediately, without one:
 
