@@ -254,7 +254,8 @@ def _run_requested_tools(run: dict, out: TurnResult, on_event=None,
             result = tools.execute(name, raw_args, tickets=tickets, asked_by=agent_name)
             ms = int((time.time() - t0) * 1000)
             failed = result.startswith("ERROR:")
-            emit(on_event, kind="tool", agent=agent_name, name=name, state="done", ms=ms, failed=failed)
+            emit(on_event, kind="tool", agent=agent_name, name=name, state="done", ms=ms, failed=failed,
+                 note=_not_raised(name, result))
             telemetry.set(
                 ts,
                 duration_ms=ms,
@@ -284,6 +285,30 @@ def _run_requested_tools(run: dict, out: TurnResult, on_event=None,
 
         outputs.append({"tool_call_id": call["id"], "output": result})
     return outputs
+
+
+def _not_raised(name: str, result: str) -> str | None:
+    """Why a raise_ticket call raised nothing, for the panel - None when it raised one.
+
+    tools.OneTicket answers a call it turns away with "ok": true, so that the
+    model tells the customer what is actually happening rather than that
+    something failed. Judged on `failed` alone, the panel showed "raise_ticket
+    done" for a ticket that was never raised - under an agent that, once
+    redeployed, does not even have the tool.
+    """
+    if name != "raise_ticket" or result.startswith("ERROR:"):
+        return None
+    try:
+        said = json.loads(result)
+    except ValueError:
+        return None
+    if not isinstance(said, dict):
+        return None
+    if said.get("left_to"):
+        return f"not raised: left to {said['left_to']}"
+    if said.get("already_raised"):
+        return f"not raised: {said.get('reference')} already stands"
+    return None
 
 
 def _too_many_rounds(out: TurnResult, rounds: int) -> bool:

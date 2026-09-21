@@ -170,12 +170,24 @@ BOOKING_WORDS = re.compile(r"\b(book|booking|appointment|appointments|reschedule
 #   - diagnostics no longer has raise_ticket at all (agents/definitions). It
 #     never sees its own earlier answers, so it could never see the customer
 #     accept the ticket it offered; every call it made was one nobody asked for.
+#
+# "One stands" means the page told us so. The server keeps no conversation, so
+# the ticket is found in what the page sends: the reference it was last given
+# (handle's `ticket`), or failing that one read back out of the history. The
+# history alone was not enough - it is six turns, and three exchanges after the
+# ticket was named it had gone, and the next brake message raised a second one.
 TICKET_REFERENCE = re.compile(r"\bTK-[0-9]{4,}\b")
+# Anything shaped like a reference, including one a digit short. Used only to
+# put the real reference in place of a wrong one (_name_the_new_ticket).
+ANY_REFERENCE = re.compile(r"\bTK-[0-9]+\b")
 
+# No callback time. booking.create_ticket promises one by urgency - within the
+# hour for safety, one working day otherwise - and the router does not know the
+# urgency of a ticket raised on an earlier message, so any time said here would
+# be wrong for some tickets. What the ticket promised was said when it was raised.
 TICKET_STANDS = (
-    "A service advisor has already been asked to call you about this - ticket {reference} - "
-    "and someone will be in touch within the hour. If it cannot wait, please call the "
-    "workshop directly."
+    "A service advisor has already been asked to call you about this - ticket {reference}. "
+    "If it cannot wait, please call the workshop directly."
 )
 
 # What diagnostics is told when the ticket is someone else's to raise and to
@@ -193,12 +205,45 @@ TICKET_OWNED_NOTE = (
     "do not offer one, and say nothing about tickets or advisors."
 )
 
-# A sentence about a ticket: the word, or a reference.
-TICKET_TALK = re.compile(r"\bticket|\bTK-[0-9]+", re.IGNORECASE)
-# The warning, in the ways the agents write it. A sentence carrying it is never
-# dropped for mentioning a ticket as well: where the two meet, the warning wins.
-DO_NOT_DRIVE = re.compile(r"\b(?:do not|don't|should not|shouldn't|must not|stop) driv", re.IGNORECASE)
+# A sentence about a ticket: the word, a reference, or the advisor's call that a
+# ticket is. Diagnostics is now told to offer "a call from a service advisor" and
+# never to say "ticket", so the word alone let that offer through - and a
+# customer whose call was already arranged was asked whether they wanted one.
+# An advisor with no call in the sentence ("have a service advisor check the
+# pads") is advice, and stays.
+TICKET_TALK = re.compile(
+    r"\bticket|\bTK-[0-9]+"
+    r"|\badvis[eo]rs?\b[^.!?]*\b(?:call|phone|ring|contact|in touch)"
+    r"|\b(?:call|phone|ring|contact)\b[^.!?]*\badvis[eo]rs?\b"
+    r"|\b(?:call|phone|ring) you\b|\bcall(?:ed)? back\b",
+    re.IGNORECASE,
+)
+# The warning, in the ways the agents write it (typographic apostrophes are made
+# plain first, see _warns). It answers one question: does a reply that lost
+# sentences to the rule above still tell the customer not to drive? A phrasing
+# it misses costs a second warning, never a missing one - see _keep_the_warning.
+DO_NOT_DRIVE = re.compile(
+    r"\b(?:do not|don't|dont|should not|shouldn't|must not|mustn't|cannot|can't|never|stop|avoid)"
+    r"(?: be)? driv"
+    r"|(?:\bnot |n't |\bun)safe to (?:keep |continue )?driv"
+    r"|\b(?:do not|don't|stop) us(?:e|ing) (?:the|your|this) (?:car|vehicle)",
+    re.IGNORECASE,
+)
 SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
+
+# The customer saying yes to diagnostics' offer of an advisor's call. Only
+# escalation can make that call, and neither classifier is asked about
+# accepting an offer: Jev's booking question counts a yes that answers an
+# appointment question, escalation's has no such clause, and a bare "yes please"
+# that matches nothing goes to diagnostics - which is told never to say that
+# someone will call. So, like BOOKING_WORDS, in code: see _with_accepted_offer.
+ADVISOR_OFFER = re.compile(r"[^.!?\n]*\badvis[eo]rs?\b[^.!?\n]*\?", re.IGNORECASE)
+YES = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|sure|please|go ahead|(?:ok|okay)\b[\s,]*(?:please|go ahead|do it|sure))\b",
+    re.IGNORECASE,
+)
+NOT_YES = re.compile(r"\b(?:no|not|don't|dont|never|later)\b", re.IGNORECASE)
+MAX_YES_WORDS = 8
 
 # Triage costs 2.0-2.7s of every reply - a quarter of it - to classify a message
 # (measured on the live app, 20 Sep). Some messages do not need classifying: a
@@ -415,6 +460,9 @@ class TriageDecision:
     # keyword check, "both", or "none".
     safety_source: str = "none"
     booking_added_by_keyword: bool = False
+    # Escalation added because the message said yes to an advisor's call that
+    # the last reply offered (_with_accepted_offer).
+    advisor_call_accepted: bool = False
     triage_skipped: bool = False
     # Which classifier decided: "agent" (gpt-4.1-mini writing JSON) or "jev"
     # (four probabilities). Recorded rather than inferred, because the whole
@@ -483,6 +531,11 @@ class RouterResult:
     # tools.OneTicket doing its job; the runbook's query reads both.
     ticket_requests: int = 0
     ticket_raised: bool = False
+    # The conversation's ticket once this message has been answered: the one that
+    # stood, or the one raised for it. The page keeps it and sends it back with
+    # every message (handle's `ticket`), because its six turns of history forget
+    # a reference three exchanges after it was given.
+    ticket: str | None = None
 
     @property
     def cached(self) -> bool:
@@ -799,14 +852,47 @@ def ticket_already_raised(history: list[dict] | None) -> str | None:
     Read from the untrimmed history, not from _recent: that shortens long turns
     to 600 characters, and a reference that fell off the end would mean a second
     ticket for the same problem.
+
+    The latest reference wins. There is only ever one ticket, but a streamed
+    reply can carry a reference an agent mis-copied, with the real one said
+    after it (_name_the_new_ticket) - and the real one is the last.
+
+    Six turns at most, the window the page sends. The reference it was last
+    given travels beside the history rather than in it, and handle() prefers
+    that; this is for callers that send only history.
     """
-    for turn in (history or [])[-MAX_HISTORY_TURNS:]:
+    for turn in reversed((history or [])[-MAX_HISTORY_TURNS:]):
         if turn.get("role") != "assistant":
             continue
-        found = TICKET_REFERENCE.search(str(turn.get("text") or ""))
+        found = TICKET_REFERENCE.findall(str(turn.get("text") or ""))
         if found:
-            return found.group(0)
+            return found[-1]
     return None
+
+
+def _with_accepted_offer(decision: TriageDecision, message: str, history: list[dict] | None) -> TriageDecision:
+    """Add escalation when the message says yes to an advisor's call the last reply offered.
+
+    Diagnostics offers the call and cannot make it (it has no raise_ticket);
+    escalation makes it. Left to the classifiers, a bare "yes please" is
+    whatever they make of it, and when that is nothing it goes to diagnostics,
+    which is told never to say that someone will call - so a customer who
+    accepted a call would get none. Narrow on purpose: the last reply has to
+    have asked a question about an advisor, and the message has to be a short
+    yes with no "not" in it. A needless escalation is one ticket for a
+    conversation that has none; a missed one is a customer left waiting.
+    """
+    last = next((t for t in reversed(history or []) if t.get("role") == "assistant"), None)
+    if last is None or "escalation" in decision.intents:
+        return decision
+    if not ADVISOR_OFFER.search(str(last.get("text") or "")):
+        return decision
+    if len(message.split()) > MAX_YES_WORDS or not YES.search(message) or NOT_YES.search(message):
+        return decision
+    log.info("escalation added: %r says yes to the advisor's call the last reply offered", message[:80])
+    decision.intents = [i for i in decision.intents if i != "other"] + ["escalation"]
+    decision.advisor_call_accepted = True
+    return decision
 
 
 def _recent(history: list[dict] | None, roles: tuple[str, ...] = ("customer", "assistant")) -> list[str]:
@@ -1120,9 +1206,15 @@ REASSURANCE = re.compile(
     re.IGNORECASE,
 )
 
-SAFETY_FALLBACK = (
+# The warning in the router's own words, for when an agent's was lost. The
+# first half of SAFETY_FALLBACK, so the customer reads the same sentence
+# whichever of the two it came from.
+SAFETY_WARNING = (
     "Do not drive the vehicle. What you describe may affect its safety, and it needs to "
-    "be checked by a technician first. Please call the workshop directly and someone "
+    "be checked by a technician first."
+)
+SAFETY_FALLBACK = (
+    f"{SAFETY_WARNING} Please call the workshop directly and someone "
     "will help you straight away."
 )
 
@@ -1199,15 +1291,17 @@ def _without_ticket_talk(text: str) -> str:
     """`text` without its sentences about a ticket, or `text` itself if it has none.
 
     Sentences, not the whole answer: the rest is a grounded explanation the
-    customer still needs. A sentence that also carries the do-not-drive warning
-    stays - better a clumsy line about a ticket than a missing warning.
+    customer still needs. Every such sentence goes, including one that also
+    says not to drive: "Do not drive the vehicle - I have raised a safety
+    ticket" kept whole is the contradiction this exists to remove. The warning
+    is put back, in the router's own words, by _keep_the_warning.
     """
     if not TICKET_TALK.search(text):
         return text
     lines, dropped = [], False
     for line in text.split("\n"):
         sentences = SENTENCE_BREAK.split(line)
-        kept = [s for s in sentences if not TICKET_TALK.search(s) or DO_NOT_DRIVE.search(s)]
+        kept = [s for s in sentences if not TICKET_TALK.search(s)]
         if len(kept) == len(sentences):
             lines.append(line)  # untouched, spacing and all
             continue
@@ -1244,6 +1338,34 @@ def _leave_the_ticket_to(speaker: str | None, turns: list[TurnResult]) -> list[s
             t.answer = kept
             edited.append(t.agent_name)
     return edited
+
+
+def _warns(text: str) -> bool:
+    """Whether `text` tells the customer not to drive. "Don\u2019t" is written with a
+    typographic apostrophe as often as a plain one."""
+    return bool(DO_NOT_DRIVE.search(text.replace("\u2019", "'")))
+
+
+def _keep_the_warning(reply: str, decision: TriageDecision, edited: list[str]) -> str:
+    """Put the do-not-drive warning back at the top if dropping ticket talk took it out.
+
+    While a ticket stands, escalation is skipped, and diagnostics is the only
+    agent left to warn. It often warns in the same sentence as it mentions the
+    ticket - "You should not be driving the car, and your safety ticket
+    TK-519169 is with an advisor" - and _leave_the_ticket_to drops that
+    sentence whole. Nothing else would put the warning back: the fallback only
+    covers a reply with no answer left in it at all.
+
+    Only on a safety-flagged message, and only when something was dropped: the
+    warning is not the router's to add to an answer it did not touch. When in
+    doubt it is added - DO_NOT_DRIVE missing a phrasing costs the customer a
+    second warning, and a missing one can cost a great deal more.
+    """
+    if not (decision.safety and edited) or _warns(reply):
+        return reply
+    log.warning("a safety reply lost its warning with what %s said about a ticket; the router's is added",
+                ", ".join(edited))
+    return f"{SAFETY_WARNING}\n\n{reply}"
 
 
 def _compose(turns: list[TurnResult], decision: TriageDecision) -> str:
@@ -1300,6 +1422,7 @@ def handle(
     on_event=None,
     triage: str = "auto",
     compare: bool = False,
+    ticket: str | None = None,
 ) -> RouterResult:
     """Handle one customer message end to end.
 
@@ -1314,6 +1437,11 @@ def handle(
     TRIAGE_BACKEND, and what every caller got before there was a choice), "jev"
     or "agent" - see plan_triage. `compare` also runs the other one on the same
     message, for the page to show beside it. Nothing is decided from that.
+
+    `ticket` is the conversation's ticket reference as an earlier reply reported
+    it (RouterResult.ticket), kept by the page beside the history. Like the
+    history it is the page's word: a caller who forges one turns escalation off
+    for their own conversation only, as a forged assistant turn already could.
     """
     plan = plan_triage(triage)
     started = time.time()
@@ -1334,7 +1462,7 @@ def handle(
             out.duration_ms = int((time.time() - started) * 1000)
         else:
             _handle_inner(client, message, timeout, agent_ids, out, started, history, on_delta,
-                          on_status, on_event, plan=plan, compare=compare)
+                          on_status, on_event, plan=plan, compare=compare, ticket=ticket)
         d = out.decision
         telemetry.set(
             req_span,
@@ -1375,6 +1503,7 @@ def _handle_inner(
     on_event=None,
     plan: TriagePlan | None = None,
     compare: bool = False,
+    ticket: str | None = None,
 ) -> None:
     plan = plan or plan_triage()
     ids = agent_ids or _agent_ids(client)
@@ -1397,7 +1526,13 @@ def _handle_inner(
     # Looked up under the classifier that will read the message - or under the
     # plain question when none will, because a bare fault code gets the same
     # answer whichever one the visitor picked.
-    cache_for = plan if not (history or compare) else None
+    #
+    # Nor with a ticket, even one sent with no history: a ticket is a
+    # conversation behind the message. While it stands the reply can carry its
+    # reference (_carry_the_ticket_forward), and kept, that reference would be
+    # handed to the next visitor - whose next message would read it back as
+    # their own ticket and skip escalation (see worth_caching).
+    cache_for = plan if not (history or compare or ticket) else None
     decision = fast_route(message, history)
     key = cache_key(message, None if decision else plan.cache_variant) if cache_for else None
     if key:
@@ -1413,9 +1548,13 @@ def _handle_inner(
         # No classifier reads a bare fault code, so there is nothing to choose
         # between and nothing to compare. The page says the toggle did not apply.
         out.triage = _choice(plan, "none", decision.reason)
+        # A no-op today - fast_route only decides a first message, and a yes
+        # needs an offer before it - but every path goes through it, so no
+        # path can be the one that forgot.
+        decision = _with_accepted_offer(decision, message, history)
         _record_decision(decision, choice=out.triage)
         _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                          on_status, on_event, cache_for=cache_for)
+                          on_status, on_event, cache_for=cache_for, ticket=ticket)
         return
 
     # The comparison runs beside the chosen classifier, never in front of it.
@@ -1434,9 +1573,15 @@ def _handle_inner(
         if classified is None:
             return  # Azure was throttling; the reply is already written
         decision, measured = classified
+        # After whichever classifier read it, Jev or the agent, and after their
+        # keyword backstops or the keyword fallback, which it does not replace:
+        # it only ever adds escalation. Not part of out.triage's reading, which
+        # is what the classifier and the net made of the message - and never
+        # applied to the compared one, which routes nothing.
+        decision = _with_accepted_offer(decision, message, history)
         _record_decision(decision, choice=out.triage, compared=compare, **measured)
         _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                          on_status, on_event, cache_for=cache_for)
+                          on_status, on_event, cache_for=cache_for, ticket=ticket)
     finally:
         if comparing is not None:
             _finish_comparison(comparing, out, on_event)
@@ -1668,6 +1813,7 @@ def _record_decision(decision: TriageDecision, choice: dict | None = None, compa
             safety_source=decision.safety_source,
             triage_parse_failed=decision.parse_failed,
             booking_added_by_keyword=decision.booking_added_by_keyword,
+            advisor_call_accepted=decision.advisor_call_accepted,
             triage_skipped=decision.triage_skipped,
             reason=decision.reason[:200],
             has_registration=bool(decision.registration),
@@ -1704,11 +1850,12 @@ AGENT_STATUS = {
 
 def _route_and_answer(client, ids, message, decision, timeout, history, out, started,
                       on_delta=None, on_status=None, on_event=None,
-                      cache_for: TriagePlan | None = None) -> None:
+                      cache_for: TriagePlan | None = None, ticket: str | None = None) -> None:
     """Run the specialists the decision calls for, then compose the reply.
 
     `cache_for` is the plan the reply may be kept for, or None when it must not
-    be kept at all - a conversation, or a comparison.
+    be kept at all - a conversation, or a comparison. `ticket` is the reference
+    the page kept for this conversation - see handle().
     """
     out.decision = decision
 
@@ -1718,8 +1865,11 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     # A human has already been called about this conversation. Calling them again
     # every turn is what the live app did on 20 Sep - see TICKET_REFERENCE.
     # Looked for on every message, not only when escalation is routed: any
-    # agent with raise_ticket has to be turned away while it stands.
-    standing = ticket_already_raised(history)
+    # agent with raise_ticket has to be turned away while it stands. The
+    # reference the page kept comes first: it is the one this server reported,
+    # and it is still there when the history has moved past the reply that gave it.
+    known = ticket if ticket and TICKET_REFERENCE.fullmatch(ticket) else None
+    standing = known or ticket_already_raised(history)
     escalation_skipped = bool(standing) and "escalation" in route
     if escalation_skipped:
         log.info("escalation skipped: ticket %s already stands for this conversation", standing)
@@ -1781,8 +1931,10 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     # agent's own words about a ticket were just dropped in favour of these.
     if standing and (escalation_skipped or tickets.asked_by or edited):
         out.reply = _carry_the_ticket_forward(out.reply, standing, decision, specialists)
+    out.reply = _keep_the_warning(out.reply, decision, edited)
     _name_the_new_ticket(out, tickets, on_delta if streamed else None)
     out.ticket_requests, out.ticket_raised = len(tickets.asked_by), bool(tickets.raised)
+    out.ticket = tickets.reference
     _note_throttling(specialists, out)
     out.duration_ms = int((time.time() - started) * 1000)
 
@@ -1824,10 +1976,27 @@ def _name_the_new_ticket(out: RouterResult, tickets: tools.OneTicket, on_delta=N
     rarely adds anything. When it does, the words are the ticket's own, from
     booking.create_ticket. A streamed reply is already on the screen, so the
     sentence is streamed after it rather than only added to the record.
+
+    Named means named correctly. A model asked to repeat a reference can get a
+    digit wrong (TICKET_REFERENCE), and the customer would then hold a reference
+    that does not exist - which the next message would also read back as the
+    one that stands. There is one ticket, so any other reference in the reply
+    is that one mis-copied, and the real one is put in its place. A streamed
+    reply cannot be corrected on the screen, so the real one is said after it,
+    last, where ticket_already_raised looks first.
     """
-    if not tickets.raised or tickets.raised in out.reply:
+    real = tickets.raised
+    if not real:
         return
-    log.warning("ticket %s was raised but the reply did not name it; adding it", tickets.raised)
+    wrong = sorted({r for r in ANY_REFERENCE.findall(out.reply) if r != real})
+    if wrong:
+        log.warning("the reply named %s for ticket %s", ", ".join(wrong), real)
+        if not on_delta:
+            out.reply = ANY_REFERENCE.sub(real, out.reply)
+            wrong = []
+    if real in out.reply and not wrong:
+        return
+    log.warning("ticket %s was raised but the reply did not name it correctly; adding it", real)
     said = tickets.confirmation
     out.reply = f"{out.reply}\n\n{said}" if out.reply.strip() else said
     if on_delta:

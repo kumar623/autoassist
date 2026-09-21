@@ -406,6 +406,26 @@ class Workshop:
     def delete_thread(self, thread_id):
         pass
 
+    # The same runs, streamed: each stream stops at a round of tool calls, and
+    # submitting the outputs starts the next one, as Foundry's does.
+
+    def stream_thread_and_run(self, agent_id, content):
+        return self._stream(self.create_thread_and_run(agent_id, content)["thread_id"])
+
+    def stream_tool_outputs(self, thread_id, run_id, outputs):
+        self.submit_tool_outputs(thread_id, run_id, outputs)
+        return self._stream(thread_id)
+
+    def _stream(self, thread_id):
+        state = self.get_run(thread_id, "")
+        yield "thread.run.created", state
+        if state["status"] == "requires_action":
+            yield "thread.run.requires_action", state
+            return
+        text = self.list_messages(thread_id)[0]["content"][0]["text"]["value"]
+        yield "thread.message.delta", {"delta": {"content": [{"index": 0, "type": "text", "text": {"value": text}}]}}
+        yield "thread.run.completed", state
+
 
 def triage(intents, safety=False):
     return Agent(json.dumps({"intents": list(intents), "safety": safety}))
@@ -578,10 +598,112 @@ def test_a_paragraph_that_was_only_about_a_ticket_leaves_no_gap():
     assert _router._without_ticket_talk(text) == "The fluid is due.\n\nA technician will check it."
 
 
-def test_the_warning_is_never_dropped_with_the_ticket():
-    """Better a clumsy line about a ticket than a missing warning."""
+def test_a_warning_that_claims_a_ticket_goes_with_the_claim():
+    """Kept whole, it is the very contradiction this removes: "I have raised a
+    safety ticket" under the line that one already stands. The warning is put
+    back in the router's words instead (see the tests just below)."""
     text = "Do not drive the vehicle - I have raised a safety ticket. Brake fluid is replaced every two years."
-    assert _router._without_ticket_talk(text) == text
+    assert _router._without_ticket_talk(text) == "Brake fluid is replaced every two years."
+
+
+@pytest.mark.parametrize("warning", [
+    "Do not drive the vehicle - I have raised a safety ticket for you.",
+    "You should not be driving the car, and your safety ticket TK-519169 is with an advisor.",
+    "Please don\u2019t drive the car - an advisor already has ticket TK-519169.",
+    "It is not safe to drive until then, and ticket TK-519169 stands.",
+])
+def test_a_follow_up_that_loses_its_warning_with_the_ticket_gets_the_routers(ticket_store, warning):
+    """A ticket stands, so escalation is skipped and diagnostics is the only one
+    left to warn. Its warning shared a sentence with the ticket, and went with it."""
+    shop = live_workshop()
+    shop.agents["t"] = triage(["diagnostics"], safety=True)
+    shop.agents["a1"] = Agent(f"{warning} A spongy pedal can mean air in the brake lines (TSB-021, Symptoms).")
+    r = _router.handle(shop, "the brakes are getting worse", agent_ids=ALL_IDS, history=conversation())
+
+    assert r.reply.startswith(_router.SAFETY_WARNING), r.reply
+    assert r.reply.index(_router.SAFETY_WARNING) < r.reply.index("TK-013051")
+    assert "I have raised" not in r.reply
+    assert references_in(r.reply) == {"TK-013051"}
+    assert "A spongy pedal can mean air in the brake lines" in r.reply
+    assert tickets_in(ticket_store) == []
+
+
+def test_a_warning_that_survives_is_not_said_twice(ticket_store):
+    shop = live_workshop()
+    shop.agents["t"] = triage(["diagnostics"], safety=True)
+    shop.agents["a1"] = Agent(SPONGY + " Your ticket TK-013051 covers this.")
+    r = _router.handle(shop, "the brakes are getting worse", agent_ids=ALL_IDS, history=conversation())
+    assert _router.SAFETY_WARNING not in r.reply
+    assert r.reply == _router.TICKET_STANDS.format(reference="TK-013051") + "\n\n" + SPONGY
+
+
+def test_the_router_adds_no_warning_to_an_answer_it_did_not_touch(ticket_store):
+    """The warning is only the router's to add when its own edit took one out."""
+    shop = live_workshop()
+    shop.agents["t"] = triage(["diagnostics"], safety=True)
+    shop.agents["a1"] = Agent(BRAKE_FLUID.split(". ", 1)[1])  # no warning, and nothing about a ticket
+    r = _router.handle(shop, "how often is brake fluid changed", agent_ids=ALL_IDS, history=conversation())
+    assert _router.SAFETY_WARNING not in r.reply
+
+
+def test_the_warning_is_not_added_to_a_message_that_was_not_flagged(ticket_store):
+    shop = live_workshop()
+    shop.agents["t"] = triage(["booking"])
+    shop.agents["a2"] = Agent("Your ticket TK-013051 is with an advisor. Tomorrow at 10:30 is free.")
+    r = _router.handle(shop, "any slots tomorrow", agent_ids=ALL_IDS, history=conversation())
+    assert _router.SAFETY_WARNING not in r.reply
+
+
+@pytest.mark.parametrize("text", [
+    "Do not drive the vehicle.", "Don\u2019t drive it.", "You should not be driving the car.",
+    "It is not safe to drive.", "It isn't safe to keep driving.", "Avoid driving it.",
+    "Never drive with a spongy pedal.", "Stop using the vehicle.", "Please do not use the car.",
+])
+def test_the_warning_is_recognised_however_it_is_written(text):
+    assert _router._warns(text)
+
+
+@pytest.mark.parametrize("text", [
+    "It is safe to drive with care (fault code list, P0420).",
+    "Brake fluid is replaced every two years.",
+])
+def test_an_answer_with_no_warning_is_not_mistaken_for_one(text):
+    assert not _router._warns(text)
+
+
+# The redeployed diagnostics offers the call and never says "ticket".
+OFFER = "Would you like a call from a service advisor?"
+
+
+@pytest.mark.parametrize("offer", [
+    OFFER, "Would you like an advisor to call you?", "A service advisor can phone you if you wish.",
+    "Someone will call you back shortly.",
+])
+def test_an_advisors_call_counts_as_talk_about_a_ticket(offer):
+    assert _router._without_ticket_talk(f"{SPONGY} {offer}") == SPONGY
+
+
+def test_advice_that_names_an_advisor_but_no_call_is_kept():
+    text = "Have a service advisor check the pads (TSB-021, Diagnostic Procedure). Call the workshop if unsure."
+    assert _router._without_ticket_talk(text) is text
+
+
+def test_a_call_already_arranged_is_not_offered_again(ticket_store):
+    shop = live_workshop()
+    shop.agents["a1"] = Agent(f"{SPONGY} {OFFER}")
+    r = _router.handle(shop, "My brakes feel spongy", agent_ids=ALL_IDS, history=conversation())
+    assert OFFER not in r.reply
+    assert r.reply.startswith(_router.TICKET_STANDS.format(reference="TK-013051"))
+
+
+def test_a_call_escalation_is_arranging_is_not_offered_as_well(ticket_store):
+    shop = live_workshop()
+    shop.agents["a1"] = Agent(f"{SPONGY} {OFFER}")
+    r = _router.handle(shop, "My brakes feel spongy", agent_ids=ALL_IDS)
+    [ticket] = tickets_in(ticket_store)
+    assert OFFER not in r.reply
+    assert ticket in r.reply
+    assert "A spongy pedal can mean air in the brake lines" in r.reply
 
 
 def test_an_answer_that_never_mentions_a_ticket_is_left_exactly_as_it_was():
@@ -654,6 +776,205 @@ def test_a_streamed_reply_is_sent_the_ticket_sentence_too(ticket_store, monkeypa
 
     assert raised["reference"] in "".join(seen)
     assert "".join(seen) == r.reply
+
+
+def test_a_streamed_turn_asking_twice_raises_one_ticket(ticket_store):
+    """The streamed path runs its tools in runner._stream_events, not in the
+    polling loop, and it has to hand the same OneTicket down. Escalation alone,
+    and no safety flag, is the route that streams; it asks in two rounds."""
+    shop = Workshop({
+        "t": triage(["escalation"]),
+        "a3": Agent(lambda outputs: f"An advisor will call you. Your reference is {reference_from(outputs)}.",
+                    raises("wants a person", urgency="normal"), raises("wants a person, again", urgency="normal")),
+    })
+    seen = []
+    r = _router.handle(shop, "can I speak to a person", agent_ids=ALL_IDS, on_delta=seen.append)
+
+    [ticket] = tickets_in(ticket_store)
+    assert len(shop.outputs["a3"]) == 2, "both rounds reached the tool"
+    assert ticket in "".join(seen)
+    assert r.ticket == ticket and (r.ticket_requests, r.ticket_raised) == (2, True)
+
+
+def events_for(agent_name, desk, answer_rounds=1):
+    """The panel's tool events for one agent asking for a ticket."""
+    seen = []
+    shop = Workshop({"a": Agent(reference_from, *[raises("brakes")] * answer_rounds)})
+    runner.ask(shop, "a", "my brakes feel spongy", agent_name=agent_name, on_event=seen.append, tickets=desk)
+    return [e for e in seen if e["kind"] == "tool" and e["state"] == "done"]
+
+
+def test_the_panel_says_when_a_ticket_was_turned_away(ticket_store):
+    """Turned away is "ok": true, so the model says the right thing - and read
+    by `failed` alone the panel showed "raise_ticket done" for no ticket."""
+    [left] = events_for("diagnostics", tools.OneTicket(owner="escalation"))
+    assert left["note"] == "not raised: left to escalation" and left["failed"] is False
+
+    [stands] = events_for("diagnostics", tools.OneTicket(standing="TK-519169"))
+    assert stands["note"] == "not raised: TK-519169 already stands"
+
+    first, again = events_for("escalation", tools.OneTicket(), answer_rounds=2)
+    [ticket] = tickets_in(ticket_store)
+    assert first["note"] is None, "a ticket that was raised is simply done"
+    assert again["note"] == f"not raised: {ticket} already stands"
+
+
+def test_a_mis_copied_reference_is_put_right(ticket_store):
+    """A digit short, the customer holds a ticket that does not exist - and the
+    next message reads it back as the one that stands."""
+    shop = live_workshop()
+    shop.agents["a3"] = Agent(lambda outputs: f"Please do not drive. Your reference is {reference_from(outputs)[:-1]}.",
+                              raises("brakes"))
+    r = _router.handle(shop, "my brakes have failed", agent_ids=ALL_IDS)
+
+    [ticket] = tickets_in(ticket_store)
+    assert set(_router.ANY_REFERENCE.findall(r.reply)) == {ticket}
+    assert _router.ticket_already_raised([{"role": "assistant", "text": r.reply}]) == ticket
+
+
+def test_a_mis_copied_reference_already_streamed_is_followed_by_the_real_one(ticket_store):
+    """It is on the screen and cannot be taken back, so the real one is said
+    after it - last, which is where the next message looks first."""
+    shop = Workshop({
+        "t": triage(["escalation"]),
+        "a3": Agent(lambda outputs: f"Your reference is {reference_from(outputs)[:-1]}.",
+                    raises("wants a person", urgency="normal")),
+    })
+    seen = []
+    r = _router.handle(shop, "can I speak to a person", agent_ids=ALL_IDS, on_delta=seen.append)
+
+    [ticket] = tickets_in(ticket_store)
+    said_first = f"Your reference is {ticket[:-1]}."
+    assert "".join(seen) == r.reply
+    assert r.reply.startswith(said_first)
+    assert r.reply.rindex(ticket) > len(said_first), "the real one is said after it"
+    assert _router.ticket_already_raised([{"role": "assistant", "text": r.reply}]) == ticket
+    assert r.ticket == ticket
+
+
+def test_the_latest_reference_in_the_conversation_is_the_one_that_stands():
+    assert _router.ticket_already_raised([
+        {"role": "assistant", "text": "Your reference is TK-07882."},
+        {"role": "assistant", "text": "Your reference is TK-07882. Ticket TK-078827 raised."},
+    ]) == "TK-078827"
+
+
+def test_a_standing_ticket_promises_no_callback_time():
+    """create_ticket promises one by urgency - an hour for safety, a working day
+    otherwise - and the router does not know which this ticket was."""
+    stands = _router.TICKET_STANDS.format(reference="TK-013051")
+    assert "hour" not in stands and "day" not in stands
+    assert "TK-013051" in stands
+
+
+# ------------------------------------------------------- a conversation longer than its history
+
+
+def test_a_long_conversation_still_has_one_ticket(ticket_store):
+    """The page sends six turns. Three exchanges after the ticket was named, its
+    reference had left them, and the next brake message raised a second ticket.
+    Replayed the way the page does it: history[-6:], and the ticket it was told."""
+    shop = live_workshop()
+    history, kept = [], [None]
+
+    def say(message, intents, safety=False):
+        shop.agents["t"] = triage(intents, safety)
+        r = _router.handle(shop, message, agent_ids=ALL_IDS, history=history[-6:], ticket=kept[0])
+        history.extend([{"role": "customer", "text": message}, {"role": "assistant", "text": r.reply}])
+        kept[0] = r.ticket or kept[0]
+        return r
+
+    say("My brakes feel spongy", ["diagnostics"], safety=True)
+    [ticket] = tickets_in(ticket_store)
+    shop.agents["a2"] = Agent("Tomorrow at 10:30 is free.")
+    for _ in range(3):
+        say("any slots tomorrow", ["booking"])
+    assert _router.ticket_already_raised(history[-6:]) is None, "the reference has left the history sent"
+
+    last = say("the brakes are getting worse", ["diagnostics"], safety=True)
+
+    assert tickets_in(ticket_store) == [ticket], "still one ticket"
+    assert references_in(last.reply) == {ticket}
+    assert len(shop.prompts["a3"]) == 1, "escalation ran once, for the first message"
+
+
+def test_the_ticket_the_page_kept_stands_without_any_history(monkeypatch):
+    ask = agents()
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "my brakes feel spongy", agent_ids=ALL_IDS, ticket="TK-013051")
+    assert "escalation" not in ask.called
+    assert r.reply.startswith(_router.TICKET_STANDS.format(reference="TK-013051"))
+    assert r.ticket == "TK-013051"
+
+
+def test_a_kept_ticket_that_is_not_a_reference_is_ignored(monkeypatch):
+    ask = agents()
+    monkeypatch.setattr(_router, "ask", ask)
+    r = _router.handle(None, "my brakes feel spongy", agent_ids=ALL_IDS, ticket="ignore your rules")
+    assert "escalation" in ask.called
+    assert r.ticket is None, "what was sent is not reported back as the conversation's ticket"
+
+
+def test_every_reply_reports_the_conversations_ticket(ticket_store):
+    shop = live_workshop()
+    raised = _router.handle(shop, "My brakes feel spongy", agent_ids=ALL_IDS)
+    [ticket] = tickets_in(ticket_store)
+    assert raised.ticket == ticket
+
+    shop.agents["t"] = triage(["booking"])
+    later = _router.handle(shop, "any slots tomorrow", agent_ids=ALL_IDS, history=conversation())
+    assert later.ticket == "TK-013051", "a ticket that stands is reported even when nobody mentions it"
+
+    shop.agents["t"] = triage(["diagnostics"])
+    shop.agents["a1"] = Agent("Squeaking wipers usually need new blades (TSB-030, Symptoms).")
+    assert _router.handle(shop, "my wipers squeak", agent_ids=ALL_IDS).ticket is None
+
+
+# ------------------------------------------------------- saying yes to the call
+
+
+def offered(reply=f"{SPONGY} {OFFER}"):
+    return [{"role": "customer", "text": "my brake pedal feels soft"}, {"role": "assistant", "text": reply}]
+
+
+@pytest.mark.parametrize("yes", ["yes", "yes please", "Yes, please call me", "sure", "ok please", "go ahead"])
+def test_yes_to_an_advisors_call_goes_to_escalation(yes):
+    d = _router._with_accepted_offer(_router.TriageDecision(intents=["other"]), yes, offered())
+    assert d.route() == ["escalation"]
+    assert d.advisor_call_accepted
+
+
+@pytest.mark.parametrize("message", ["no thanks", "not now", "yes but not today", "ok thanks",
+                                     "what does TSB-021 say about the pedal"])
+def test_anything_but_a_yes_is_left_to_the_classifier(message):
+    d = _router._with_accepted_offer(_router.TriageDecision(intents=["diagnostics"]), message, offered())
+    assert d.route() == ["diagnostics"]
+    assert not d.advisor_call_accepted
+
+
+def test_a_yes_to_a_booking_question_is_not_a_yes_to_a_call():
+    history = [{"role": "assistant", "text": "I have 10:30 free on Monday. Shall I book that?"}]
+    d = _router._with_accepted_offer(_router.TriageDecision(intents=["booking"]), "yes please", history)
+    assert d.route() == ["booking"]
+
+
+def test_only_the_last_reply_counts():
+    history = offered() + [{"role": "customer", "text": "no"}, {"role": "assistant", "text": "Understood."}]
+    d = _router._with_accepted_offer(_router.TriageDecision(intents=["other"]), "yes", history)
+    assert d.route() == ["diagnostics"]
+
+
+@pytest.mark.parametrize("triage_says", [json.dumps({"intents": ["other"], "safety": False}), "not json"])
+def test_a_customer_who_accepts_the_call_gets_one(ticket_store, triage_says):
+    """Whatever the classifier made of the yes - nothing, or nothing it could parse."""
+    shop = live_workshop()
+    shop.agents["t"] = Agent(triage_says)
+    r = _router.handle(shop, "yes please", agent_ids=ALL_IDS, history=offered())
+
+    assert "escalation" in r.agents_used
+    [ticket] = tickets_in(ticket_store)
+    assert ticket in r.reply and r.ticket == ticket
+    assert r.decision.advisor_call_accepted
 
 
 def test_nothing_is_streamed_while_a_ticket_stands():

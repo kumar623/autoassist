@@ -154,6 +154,12 @@ class ChatRequest(BaseModel):
     # Also run the other classifier on the same message and report what it made
     # of it. Display only: the route, the reply and the tickets do not change.
     compare: bool = False
+    # The conversation's ticket, as an earlier reply's `ticket` gave it. Kept by
+    # the page beside the history rather than read out of it: the history is six
+    # turns, and three exchanges after a ticket was named the reference had gone
+    # from it, so the next safety message raised a second ticket. Optional, and
+    # only ever a reference - anything else is refused here, not trusted later.
+    ticket: Optional[str] = Field(None, pattern=r"^TK-[0-9]{4,}$", max_length=20)
 
 
 class ChatResponse(BaseModel):
@@ -176,6 +182,9 @@ class ChatResponse(BaseModel):
     # The other classifier's reading, when `compare` was asked for:
     # {"chosen", "other", "differences"}.
     comparison: Optional[dict] = None
+    # The conversation's ticket after this message, if it has one: the page
+    # keeps it and sends it back as the request's `ticket`.
+    ticket: Optional[str] = None
 
 
 @app.get("/health")
@@ -274,6 +283,7 @@ def chat(req: ChatRequest, request: Request) -> ChatResponse:
             history=[h.model_dump() for h in req.history],
             triage=req.triage,
             compare=req.compare,
+            ticket=req.ticket,
         )
     except Exception as e:  # noqa: BLE001
         METRICS["failures"] += 1
@@ -329,6 +339,7 @@ def _chat_response(result, started: float) -> ChatResponse:
         retry_after=result.retry_after,
         triage=result.triage,
         comparison=result.comparison,
+        ticket=result.ticket,
     )
 
 
@@ -346,8 +357,10 @@ def chat_stream(req: ChatRequest, request: Request):
         {"type": "done",  ...}             the whole ChatResponse, with the trace
         {"type": "error", "detail": "..."}
 
-    Safety-flagged messages are not streamed - see router._can_stream - so the
-    reply still arrives in one piece there, after the checks have run.
+    Safety-flagged messages are not streamed, and nor is anything answered by
+    several specialists or sent while a ticket already stands in the
+    conversation - see router._can_stream - so the reply arrives in one piece
+    there, after the checks have run.
     """
     client = STATE.get("client")
     if client is None:
@@ -369,6 +382,7 @@ def chat_stream(req: ChatRequest, request: Request):
             result = routing.handle(
                 client, req.message.strip(), timeout=REQUEST_TIMEOUT, agent_ids=STATE["agent_ids"],
                 history=[h.model_dump() for h in req.history], triage=req.triage, compare=req.compare,
+                ticket=req.ticket,
                 on_delta=fragments.put, on_status=lambda text: fragments.put(("status", text)),
                 # Called from inside the agent threads, several at once when the
                 # specialists run in parallel. Queue.put is what makes that safe.
@@ -410,7 +424,8 @@ def chat_stream(req: ChatRequest, request: Request):
                 body = _chat_response(payload, started)
                 # The customer has already read the streamed text; sending it again
                 # would duplicate it, so `reply` is only included when nothing was
-                # streamed (several agents, or a safety answer held back for checks).
+                # streamed (several agents, a safety answer held back for checks, or
+                # a reply that has to say a ticket already stands).
                 yield _sse({"type": "done", **body.model_dump(),
                             "reply": "" if streamed.strip() else body.reply})
         finally:

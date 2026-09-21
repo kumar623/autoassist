@@ -667,6 +667,65 @@ def test_the_other_classifiers_key_cannot_be_reached_by_typing():
     assert _router.cache_key("jev\nwhat does P0420 mean") != _router.cache_key("what does P0420 mean", "jev")
 
 
+def test_a_message_with_a_ticket_is_never_answered_from_the_cache():
+    handle("what does P0420 mean")
+    out, _ = handle("what does P0420 mean", ticket="TK-013051")
+    assert not out.cached
+    assert out.ticket == "TK-013051"
+
+
+def test_a_message_with_a_ticket_never_fills_the_cache():
+    """With no history, but a ticket: the reply can name it, and the next visitor
+    handed that reply would have someone else's ticket in their conversation."""
+    handle("what does P0420 mean", ticket="TK-013051")
+    assert _router.ANSWERS.get("what does p0420 mean") is None
+
+
+# ------------------------------------------------- a yes to an advisor's call
+
+OFFERED = [
+    {"role": "customer", "text": "my brake pedal feels soft"},
+    {"role": "assistant", "text": "Have it checked soon. Would you like a call from a service advisor?"},
+]
+
+
+def test_a_yes_that_jev_routes_nowhere_still_reaches_escalation(jev_key, monkeypatch):
+    """_with_accepted_offer runs after Jev as it does after the agent. What the
+    card shows as Jev's reading is still Jev's and the net's alone."""
+    monkeypatch.setattr(typesafe, "ask", jev_says())
+    out, seen = handle("yes please", triage="jev", history=OFFERED)
+
+    assert out.triage["used"] == "jev"
+    assert "escalation" in _router.ask.called
+    assert out.decision.advisor_call_accepted
+    assert "escalation" in the(seen, "route")["agents"]
+    assert "escalation" not in out.triage["reading"]["route"]
+
+
+def test_a_yes_reaches_escalation_when_jev_could_not_answer(jev_key, monkeypatch):
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    monkeypatch.setattr(_router, "ask", agents(intents=("other",)))
+    out, _ = handle("yes please", triage="jev", history=OFFERED)
+
+    assert out.triage["used"] == "agent"
+    assert "escalation" in _router.ask.called
+    assert out.decision.advisor_call_accepted
+
+
+def test_a_yes_reaches_escalation_with_compare_on_and_the_compared_one_is_left_alone(jev_key, monkeypatch):
+    """The call is the router's to add, not either classifier's, so it is no
+    difference between them: both read "yes please" as nothing in particular."""
+    monkeypatch.setattr(typesafe, "ask", jev_says())
+    monkeypatch.setattr(_router, "ask", agents(intents=("other",)))
+    out, seen = handle("yes please", history=OFFERED, compare=True)
+
+    assert "escalation" in _router.ask.called
+    compared = the(seen, "compare")
+    assert "escalation" not in compared["other"]["route"]
+    assert "escalation" not in compared["chosen"]["route"]
+    assert compared["differences"] == []
+
+
 # -------------------------------------------------------------- telemetry
 
 

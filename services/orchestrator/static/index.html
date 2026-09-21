@@ -208,6 +208,7 @@
   #steps .what.wrap { white-space: normal; overflow-wrap: anywhere; }
   #steps li.running .what { color: var(--accent); }
   #steps li.failed .what { color: var(--safety); }
+  #steps li.turned-away .what { color: var(--muted); }
   #steps .none { color: var(--muted); font-style: italic; }
 
   .agent-ref { border-top: 1px solid var(--line); padding: 8px 0 0; margin-top: 10px; }
@@ -393,6 +394,11 @@ const status = document.getElementById('status');
 // your registration?" arrived on its own and nobody knew what it was for.
 const history = [];
 const HISTORY_SENT = 6;
+// The conversation's ticket, as the last reply that had one reported it. Sent
+// beside the history rather than left in it: six turns forget a reference three
+// exchanges after it was given, and the next safety message raised a second
+// ticket. Replaced when a reply reports one, never cleared by a reply that does not.
+let ticket = null;
 
 // ---------------------------------------------------------- the agents panel
 //
@@ -687,8 +693,12 @@ function onActivity(ev) {
       light(key);
       step(ev.agent, ev.name, ev.name, 'running');
     } else {
+      // A raise_ticket that was turned away finished without failing, and
+      // without raising anything - the note says which, so "done" is not read
+      // as a ticket raised.
       mark(key, ev.failed ? 'failed' : 'done');
-      step(ev.agent, ev.name, ev.name, ev.failed ? 'failed' : 'done', ev.ms);
+      step(ev.agent, ev.name, ev.note ? ev.name + ' · ' + ev.note : ev.name,
+           ev.failed ? 'failed' : ev.note ? 'turned-away' : 'done', ev.ms);
     }
   }
 }
@@ -1055,10 +1065,11 @@ async function askServer(text) {
     // The answer arrives as it is written. A specialist takes 5-8s to write one,
     // and waiting for all of it before showing anything is most of what made
     // this feel slow. Safety answers are not streamed: they are checked first.
+    // Nor are replies from several agents, or any sent while a ticket stands.
     const r = await fetch('/chat/stream', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT),
+      body: JSON.stringify({message: text, history: history.slice(-HISTORY_SENT), ticket,
                             triage: triageChoice, compare: compareAsked})
     });
     if (!r.ok || !r.body) {
@@ -1111,6 +1122,7 @@ async function askServer(text) {
       if (done.reply) bubble.textContent = done.reply;   // was not streamed
       if (done.safety) bubble.classList.add('safety');
       history.push({role: 'customer', text}, {role: 'assistant', text: done.reply || streamed});
+      if (done.ticket) ticket = done.ticket;
       meta(col, done);
       // The compare event normally drew the card already; the final answer
       // carries the same data, in case that event was lost on the way.
