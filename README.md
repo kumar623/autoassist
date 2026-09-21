@@ -189,9 +189,12 @@ went wrong or was measured, why, and what changed. Short version:
     dropping diagnostics on safety messages.
 15. **Half of triage's mistakes were one ambiguous sentence.** "Include" read
     as "replace"; one rewrite took routing from 45/72 to 52/72.
-16. **A classifier beat the chat model at classifying.** Jev routed 63/72
-    right against 52/72, with two safety false alarms against seven, in 352ms
-    against 2,118ms. It is now a switch, and the live app uses it.
+16. **A classifier beat the chat model at classifying - by less than first
+    reported.** With the keyword backstops applied to both, as production does,
+    Jev routed 57/72 right against 52/72, with six safety false alarms against
+    seven, in 352ms against 2,118ms, at a sixth of the cost. The first table
+    left the backstops off Jev's side only and said 63/72 and two. It is now a
+    switch, the live app uses it, and the page can show both side by side.
 
 Almost none of them looked broken: most produced a plausible, well-written
 answer. They were found by checking whether the tool was actually called, what
@@ -358,9 +361,10 @@ by hand and is not under its management (decision 006).
   would take about eleven hours and cost about £30. More traffic than that needs
   more quota, not a faster service.
 - **Routing is classified by Jev instead of a chat model** in the live app
-  (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages: 63/72 routes right
-  against the agent's 52/72, two safety false alarms against seven, 352ms
-  against 2,118ms. Off unless the variable says so, falls back to the agent for
+  (`TRIAGE_BACKEND=jev`). Measured over 72 labelled messages, with the keyword
+  backstops on both sides as production runs them: 57/72 routes right against
+  the agent's 52/72, six safety false alarms against seven, 352ms against
+  2,118ms. Off unless the variable says so, falls back to the agent for
   anything it cannot answer, and the keyword safety net still runs on top — Jev
   scored a routine Hinglish complaint over the safety bar, and the vendor
   documents lower non-English accuracy. See

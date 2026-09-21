@@ -8,13 +8,15 @@ answers four yes/no questions and returns a probability for each, and the policy
 changed without asking a model to behave differently.
 
 Measured on evals/routing_set.jsonl, 72 labelled messages, 21 September 2026,
-after the triage prompt was fixed:
+after the triage prompt was fixed, with the keyword backstops applied to both
+sides as production applies them (docs/evaluation.md, finding 16 - corrected on
+22 September; Jev alone, without them, is 63/72 with 2 false alarms):
 
                         triage agent      Jev
-    routes right           52/72         63/72
-    held-out only          21/30         26/30
+    routes right           52/72         57/72
+    held-out only          21/30         22/30
     safety caught          20/20         20/20
-    safety false alarms        7             2
+    safety false alarms        7             6
     latency median        2,118ms        352ms
     per 1,000 messages     $0.344        $0.056
 
