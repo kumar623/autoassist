@@ -54,8 +54,8 @@ RESULT_FIELDS = ["id", "title", "content", "doc_type", "source_file", "section",
 # (~0.7s). Short enough that a re-ingest shows up quickly.
 _SEARCHES = TimedCache(float(os.getenv("RETRIEVAL_CACHE_SECONDS", "120")), "retrieval")
 
-# Tuning. Defaults chosen by hand in week 2; week 3 measures them properly
-# against evals/golden_set.jsonl before anyone claims they are right.
+# Tuning. Set by hand in week 2 and not tuned since: measuring them against
+# evals/golden_set.jsonl is still open (docs/evaluation.md, "Still open").
 DEFAULT_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "5"))
 RELEVANCE_FLOOR = float(os.getenv("RETRIEVAL_FLOOR", "0.0155"))
 MAX_PER_SOURCE = int(os.getenv("RETRIEVAL_MAX_PER_SOURCE", "2"))
@@ -83,9 +83,6 @@ class Chunk:
         if self.doc_type == "maintenance":
             return f"maintenance schedule, {self.section}"
         return f"{self.source_file.replace('.pdf', '')}, {self.section.title()}"
-
-    def as_context(self) -> str:
-        return f"[{self.citation()}]\n{self.content}"
 
 
 @dataclass
@@ -162,18 +159,12 @@ def fetch_all(fields: list[str], top: int = 1000) -> list[dict]:
     return _query_index({"search": "*", "select": ",".join(fields), "top": top})
 
 
-def search(
-    query: str,
-    top_k: int = DEFAULT_TOP_K,
-    doc_type: str | None = None,
-    floor: float = RELEVANCE_FLOOR,
-    max_per_source: int = MAX_PER_SOURCE,
-) -> RetrievalResult:
+def search(query: str, doc_type: str | None = None) -> RetrievalResult:
     """Hybrid search: BM25 keyword + vector similarity, fused by RRF.
 
-    Retrieves `top_k * CANDIDATE_MULTIPLIER` candidates, drops anything below
-    the relevance floor, caps how many chunks any one file may contribute, then
-    returns the best `top_k` of what survives.
+    Retrieves `DEFAULT_TOP_K * CANDIDATE_MULTIPLIER` candidates, drops anything
+    below RELEVANCE_FLOOR, lets no one file contribute more than MAX_PER_SOURCE
+    chunks, then returns the best DEFAULT_TOP_K of what survives.
 
     Returns an empty result rather than weak matches when nothing clears the
     floor. That is the point: a wrong answer that looks sourced is worse than
@@ -184,13 +175,16 @@ def search(
         # without the filter. Never pasted into the filter as written.
         raise ValueError(f"doc_type must be one of {', '.join(DOC_TYPES)}, or left out; got {doc_type!r}")
 
+    # Read once and kept in the key: a result made under other tuning is not
+    # the answer to this search.
+    tuning = (DEFAULT_TOP_K, RELEVANCE_FLOOR, MAX_PER_SOURCE)
     return _SEARCHES.get_or_call(
-        (query.strip().lower(), doc_type, top_k, floor, max_per_source),
-        lambda: _search_now(query, top_k, doc_type, floor, max_per_source),
+        (query.strip().lower(), doc_type, *tuning),
+        lambda: _search_now(query, doc_type, *tuning),
     )
 
 
-def _search_now(query, top_k, doc_type, floor, max_per_source) -> RetrievalResult:
+def _search_now(query, doc_type, top_k, floor, max_per_source) -> RetrievalResult:
     result = RetrievalResult(query=query)
     want = top_k * CANDIDATE_MULTIPLIER
 
