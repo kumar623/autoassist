@@ -35,6 +35,7 @@ import contextvars
 import json
 import logging
 import re
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -204,6 +205,14 @@ COMPARE_TIMEOUT = 20.0
 # is not, the answer goes without it and the page says why.
 COMPARE_GRACE_SECONDS = 5.0
 
+# What comparisons have spent since this process started, per classifier, for
+# /metrics. Kept apart because a Jev token and an agent token are priced about
+# ten times apart, so one sum would move more for the cheap one than the dear
+# one. Counted when each comparison finishes, not when its answer goes: one
+# still running at the grace deadline is still billed, and is counted then.
+COMPARE_SPENT = {"jev": 0, "agent": 0}
+_COMPARE_SPENT_LOCK = threading.Lock()   # comparisons finish on several threads at once
+
 
 # --------------------------------------------------------------- answer cache
 #
@@ -260,11 +269,13 @@ def cache_key(message: str, decided_by: str | None = None) -> str | None:
     is normalised. In particular no word is removed, because "is it safe to
     drive" and "is it not safe to drive" must never meet in the same bucket.
 
-    `decided_by` names the classifier when a visitor picked one that is not this
-    server's default (TriagePlan.cache_variant). An answer one classifier routed
-    is then never handed to someone who asked for the other, which would make
-    the page's toggle show no difference at all. It sits on a line of its own:
-    the text has had its whitespace collapsed, so no message can reach that key.
+    `decided_by` names the classifier that routed the answer, when that is not
+    this server's default (TriagePlan.variant_for). An answer one classifier
+    routed is then never handed to someone who asked for the other, which would
+    make the page's toggle show no difference at all. An answer no classifier
+    routed - a bare fault code - has none, and is shared by every choice. It
+    sits on a line of its own: the text has had its whitespace collapsed, so no
+    message can reach that key.
     """
     if ANSWERS.seconds <= 0:
         return None
@@ -431,8 +442,10 @@ class RouterResult:
 
     @property
     def comparison_tokens(self) -> int:
-        """What the compared classifier spent. Kept out of total_tokens, which is
-        what the answer cost, and counted apart in /metrics so it is not hidden."""
+        """What the compared classifier spent, as far as this answer saw it: 0
+        for one still running when the answer went. Kept out of total_tokens,
+        which is what the answer cost. /metrics reads COMPARE_SPENT instead,
+        which has the late ones too, per classifier."""
         other = (self.comparison or {}).get("other") or {}
         return int(other.get("tokens") or 0)
 
@@ -598,18 +611,29 @@ class TriagePlan:
 
     @property
     def other(self) -> str:
-        """The classifier a comparison runs beside the chosen one."""
+        """The classifier a comparison runs beside the chosen one. When Jev was
+        chosen and could not answer, the agent routes and there is no second
+        one to ask - see _handle_inner."""
         return "agent" if self.first == "jev" else "jev"
+
+    def variant_for(self, backend: str | None) -> str | None:
+        """The answer-cache variant for an answer `backend` routed: None for this
+        server's default classifier, or when no classifier read the message.
+
+        Picking the classifier the server already uses changes nothing about the
+        answer, so it shares the default's cache entries; the other one does not.
+        """
+        return None if backend in (None, "none", self.default) else backend
 
     @property
     def cache_variant(self) -> str | None:
-        """None when this plan routes as "auto" would, else the classifier.
+        """Where to look for an answer the classifier asked first would route.
 
-        Picking the classifier the server already uses changes nothing about the
-        answer, so it shares the default's cache entries; picking the other one
-        does not.
+        Only where to look. An answer is kept under the classifier that actually
+        routed it (_remember_answer), which is not this one when Jev could not
+        answer.
         """
-        return None if self.first == self.default else self.first
+        return self.variant_for(self.first)
 
 
 def plan_triage(requested: str = "auto") -> TriagePlan:
@@ -1235,7 +1259,13 @@ def _handle_inner(
     # Never for a comparison, in either direction. The visitor asked to watch
     # two classifiers read the message, and a cached answer was read by neither;
     # and a comparison must have no way to change what the next visitor is served.
-    key = cache_key(message, plan.cache_variant) if not (history or compare) else None
+    #
+    # Looked up under the classifier that will read the message - or under the
+    # plain question when none will, because a bare fault code gets the same
+    # answer whichever one the visitor picked.
+    cache_for = plan if not (history or compare) else None
+    decision = fast_route(message, history)
+    key = cache_key(message, None if decision else plan.cache_variant) if cache_for else None
     if key:
         found = ANSWERS.get(key)
         if found:
@@ -1245,27 +1275,34 @@ def _handle_inner(
             return
 
     # --- 1. who should answer: the message itself, then the chosen classifier ---
-    decision = fast_route(message, history)
     if decision is not None:
         # No classifier reads a bare fault code, so there is nothing to choose
         # between and nothing to compare. The page says the toggle did not apply.
         out.triage = _choice(plan, "none", decision.reason)
         _record_decision(decision, choice=out.triage)
         _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                          on_status, on_event, cache_as=key)
+                          on_status, on_event, cache_for=cache_for)
         return
 
-    # Started before the chosen classifier, so the two read the message at the
-    # same time and the comparison is usually finished long before the answer.
-    comparing = _start_comparison(plan.other, client, ids, message, history, timeout) if compare else None
+    # The comparison runs beside the chosen classifier, never in front of it.
+    # With the agent chosen, Jev is asked at the same moment: it takes ~350ms
+    # and is done long before the answer. With Jev chosen, the agent waits for
+    # Jev's turn. If Jev cannot answer, the agent routes the message, and an
+    # agent turn started beside it would be the LLM compared with itself - and
+    # paid for twice. The card then shows Jev as the one that did not answer.
+    comparing = None
+    if compare and plan.first != "jev":
+        comparing = _start_comparison(plan.other, client, ids, message, history, timeout)
     try:
         classified = _classify(client, ids, message, history, timeout, out, started, plan, on_status, on_event)
+        if compare and plan.first == "jev":
+            comparing = _compare_after_jev(out, client, ids, message, history, timeout)
         if classified is None:
             return  # Azure was throttling; the reply is already written
         decision, measured = classified
         _record_decision(decision, choice=out.triage, compared=compare, **measured)
         _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
-                          on_status, on_event, cache_as=key)
+                          on_status, on_event, cache_for=cache_for)
     finally:
         if comparing is not None:
             _finish_comparison(comparing, out, on_event)
@@ -1351,11 +1388,39 @@ def _start_comparison(backend: str, client, ids, message, history, timeout) -> t
         # agent's turn, the call to Jev) sit under this request's trace in App
         # Insights rather than each starting a trace of its own.
         run = contextvars.copy_context().run
-        return backend, _COMPARE.submit(run, _compare_with, backend, client, ids, message, history, timeout)
+        return backend, _COMPARE.submit(run, _compare_and_count, backend, client, ids, message, history,
+                                        timeout)
     except RuntimeError:  # the pool is shut down: the process is stopping
-        never = Future()
-        never.set_result(_reading(None, backend, failed="the comparison could not start"))
-        return backend, never
+        return backend, _settled(_reading(None, backend, failed="the comparison could not start"))
+
+
+def _compare_after_jev(out: RouterResult, client, ids, message, history, timeout) -> tuple[str, Future]:
+    """The comparison when Jev was chosen, once Jev has had its turn.
+
+    When Jev answered, the agent is asked now, and reads the message while the
+    specialists write. When Jev did not, the agent has already read it to route
+    it, so there is no second opinion to ask for: the other column is Jev, not
+    answering, and nothing more is spent.
+    """
+    if (out.triage or {}).get("used") == "jev":
+        return _start_comparison("agent", client, ids, message, history, timeout)
+    return "jev", _settled(_reading(None, "jev", failed=JEV_DID_NOT_ANSWER))
+
+
+def _settled(reading: dict) -> Future:
+    """A comparison that is already over, in the shape of one still running."""
+    done = Future()
+    done.set_result(reading)
+    return done
+
+
+def _compare_and_count(backend: str, client, ids, message, history, timeout) -> dict:
+    """_compare_with, and what it spent added to COMPARE_SPENT when it finishes -
+    whether or not its answer waited for it."""
+    reading = _compare_with(backend, client, ids, message, history, timeout)
+    with _COMPARE_SPENT_LOCK:
+        COMPARE_SPENT[backend] += reading["tokens"]
+    return reading
 
 
 def _compare_with(backend: str, client, ids, message, history, timeout) -> dict:
@@ -1404,7 +1469,7 @@ def _finish_comparison(pending: tuple[str, Future], out: RouterResult, on_event=
     Called once the answer is ready, and waits a little rather than for ever:
     when the comparison is still going, the answer goes without it and the page
     says why. One still queued is cancelled; one already running finishes and
-    is dropped.
+    is dropped, though what it spent still reaches COMPARE_SPENT.
     """
     backend, future = pending
     try:
@@ -1504,10 +1569,11 @@ AGENT_STATUS = {
 
 
 def _route_and_answer(client, ids, message, decision, timeout, history, out, started,
-                      on_delta=None, on_status=None, on_event=None, cache_as: str | None = None) -> None:
+                      on_delta=None, on_status=None, on_event=None,
+                      cache_for: TriagePlan | None = None) -> None:
     """Run the specialists the decision calls for, then compose the reply.
 
-    `cache_as` is the key the reply may be kept under, or None when it must not
+    `cache_for` is the plan the reply may be kept for, or None when it must not
     be kept at all - a conversation, or a comparison.
     """
     out.decision = decision
@@ -1571,7 +1637,7 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
     _note_throttling(specialists, out)
     out.duration_ms = int((time.time() - started) * 1000)
 
-    _remember_answer(message, history, out, cache_as)
+    _remember_answer(message, history, out, cache_for)
 
     log.info(
         "handled in %dms: agents=%s tokens=%d",
@@ -1629,13 +1695,20 @@ def _serve_cached(found: CachedAnswer, out: RouterResult, started: float, on_del
     out.duration_ms = int((time.time() - started) * 1000)
 
 
-def _remember_answer(message: str, history: list[dict] | None, out: RouterResult, key: str | None) -> None:
+def _remember_answer(message: str, history: list[dict] | None, out: RouterResult,
+                     plan: TriagePlan | None) -> None:
     """Keep this reply for the next person who asks the same thing, if it may be kept.
 
-    Under the key it was looked up by, which carries the classifier when the
-    visitor picked one other than the server's default - see cache_key.
+    Under the classifier that actually routed it, worked out now rather than
+    from what the visitor asked for: when Jev could not answer, the agent routed
+    it, and a Jev chooser must not be handed that as Jev's. Under the plain
+    question when no classifier read the message - see cache_key.
     """
-    if not key or not worth_caching(message, out, history):
+    if plan is None or not worth_caching(message, out, history):
+        return
+    decision = out.decision
+    key = cache_key(message, plan.variant_for("none" if decision.triage_skipped else decision.backend))
+    if not key:
         return
     ANSWERS.put(key, CachedAnswer(
         reply=out.reply,

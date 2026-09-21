@@ -96,9 +96,6 @@ METRICS = {
     "triage_choice_jev": 0,
     "triage_choice_agent": 0,
     "triage_compare": 0,
-    # Spent on the compared classifier, which answers nobody. Not in
-    # total_tokens - that is what the answers cost - but not hidden either.
-    "compare_tokens": 0,
 }
 
 # /chat and /chat/stream are public. LIMITS is what stops one visitor - or one
@@ -220,6 +217,13 @@ def metrics() -> dict:
     m["triage_backend"] = roster.triage_backend()
     m["jev_answered"] = jev_triage.STATS["answered"]
     m["jev_fell_back"] = jev_triage.STATS["fell_back"]
+    # Spent on the compared classifier, which answers nobody. Not in
+    # total_tokens - that is what the answers cost - but not hidden either. One
+    # figure per classifier, because their tokens are priced about ten times
+    # apart, and counted as each comparison finishes, so one that outlived its
+    # answer is in it too.
+    m["compare_tokens_jev"] = routing.COMPARE_SPENT["jev"]
+    m["compare_tokens_agent"] = routing.COMPARE_SPENT["agent"]
     return m
 
 
@@ -297,7 +301,6 @@ def _chat_response(result, started: float) -> ChatResponse:
     """Count one handled message and shape the reply. Used by both endpoints."""
     decision = result.decision
     METRICS["total_tokens"] += result.total_tokens
-    METRICS["compare_tokens"] += result.comparison_tokens
     METRICS["total_ms"] += int((time.time() - started) * 1000)
     if decision and decision.safety:
         METRICS["safety_flagged"] += 1

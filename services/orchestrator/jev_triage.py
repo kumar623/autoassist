@@ -260,8 +260,11 @@ def classify(message: str, history: list | None = None, *, for_routing: bool = T
     model that was doing this before, not a reason to fail a customer's message.
 
     `for_routing=False` is the page's side-by-side comparison, where Jev's
-    answer is only shown. It is not counted in STATS: nothing falls back when a
-    comparison fails, and /metrics reads those numbers as what routing did.
+    answer is only shown. It is not counted in STATS, and a failure is not
+    logged as a fallback: nothing falls back when a comparison fails, and
+    /metrics and the logs are read as what routing did. A comparison's log line
+    names the exception type only - it is one card on a page, not worth a
+    traceback or an HTTP client's text.
     """
     def count(outcome: str) -> None:
         if for_routing:
@@ -271,11 +274,17 @@ def classify(message: str, history: list | None = None, *, for_routing: bool = T
     try:
         answer = typesafe.ask(state_for(message, history), QUESTIONS, timeout=TIMEOUT, retries=0)
     except typesafe.TypeSafeUnavailable as e:
-        log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
+        if for_routing:
+            log.warning("Jev could not classify this message, falling back to the triage agent: %s", e)
+        else:
+            log.warning("Jev could not answer a comparison (%s)", type(e).__name__)
         count("fell_back")
         return None
-    except Exception:  # noqa: BLE001 - a new dependency must not be able to break routing
-        log.exception("Jev classification failed unexpectedly; falling back to the triage agent")
+    except Exception as e:  # noqa: BLE001 - a new dependency must not be able to break routing
+        if for_routing:
+            log.exception("Jev classification failed unexpectedly; falling back to the triage agent")
+        else:
+            log.warning("Jev could not answer a comparison (%s)", type(e).__name__)
         count("fell_back")
         return None
 
@@ -284,7 +293,10 @@ def classify(message: str, history: list | None = None, *, for_routing: bool = T
     for name in QUESTIONS:
         found = typesafe.probability(answers, name)
         if found is None:
-            log.warning("Jev did not answer %r; falling back to the triage agent", name)
+            if for_routing:
+                log.warning("Jev did not answer %r; falling back to the triage agent", name)
+            else:
+                log.warning("Jev did not answer %r in a comparison", name)
             count("fell_back")
             return None
         probabilities[name] = round(found, 3)

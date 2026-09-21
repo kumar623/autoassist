@@ -101,6 +101,22 @@ def fresh_stats():
     jev_triage.STATS.update(answered=0, fell_back=0)
 
 
+@pytest.fixture
+def fresh_spend(monkeypatch):
+    """A counter of its own for this test. The one test that leaves a comparison
+    running past its answer waits for it to be counted before it ends."""
+    spent = {"jev": 0, "agent": 0}
+    monkeypatch.setattr(_router, "COMPARE_SPENT", spent)
+    return spent
+
+
+def jev_down(message="api.typesafe.ai is rate limiting this key (HTTP 429)"):
+    def ask(*a, **k):
+        raise typesafe.TypeSafeUnavailable(message)
+
+    return ask
+
+
 def handle(message="my wipers squeak", **kw):
     seen = []
     out = _router.handle(None, message, agent_ids=ALL_IDS, on_event=seen.append, **kw)
@@ -321,6 +337,50 @@ def test_a_compared_agent_turn_is_not_part_of_the_answer(jev_key, monkeypatch):
     assert [t["agent"] for t in out.trace()] == ["diagnostics"]
 
 
+def test_jev_chosen_but_unable_to_answer_is_compared_as_jev_not_answering(jev_key, monkeypatch, fresh_spend):
+    """The agent routes in Jev's place, and that is its only turn. A second one
+    beside it would be the LLM compared with itself, paid for twice, with its
+    run-to-run wobble shown as a difference between two classifiers."""
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    out, seen = handle(triage="jev", compare=True)
+
+    assert _router.ask.called.count("triage") == 1, "the agent's triage turn was paid for once"
+    assert out.triage["used"] == "agent" and out.triage["why"] == _router.JEV_DID_NOT_ANSWER
+    compared = the(seen, "compare")
+    assert compared["chosen"]["backend"] == "agent" and compared["chosen"]["ok"] is True
+    assert compared["other"]["backend"] == "jev" and compared["other"]["ok"] is False
+    assert compared["other"]["error"] == _router.JEV_DID_NOT_ANSWER
+    assert compared["differences"] == []
+    assert out.comparison_tokens == 0 and fresh_spend == {"jev": 0, "agent": 0}
+    assert out.reply == "answer from diagnostics"
+
+
+def test_the_same_holds_where_jev_is_the_servers_default(jev_default, monkeypatch):
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    out, _ = handle(compare=True)
+    assert _router.ask.called.count("triage") == 1
+    assert out.comparison["chosen"]["backend"] == "agent"
+    assert out.comparison["other"]["backend"] == "jev" and out.comparison["other"]["ok"] is False
+
+
+def test_jev_chosen_and_then_azure_throttled_compares_nothing_twice(jev_key, monkeypatch):
+    """Neither answered: Jev was down and the agent had no quota. The warning
+    still comes first, and nothing more is asked of anyone."""
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    called = []
+
+    def throttled(*a, agent_name="", **k):
+        called.append(agent_name)
+        raise azure_http.Throttled(429, "no quota", "POST", "https://x", retry_after=20.0)
+
+    monkeypatch.setattr(_router, "ask", throttled)
+    out, _ = handle(BRAKE_FLUID, triage="jev", compare=True)
+    assert called == ["triage"]
+    assert out.throttled and out.reply == _router.SAFETY_FALLBACK
+    assert out.comparison["chosen"]["ok"] is False and out.comparison["other"]["ok"] is False
+    assert out.comparison["other"]["backend"] == "jev"
+
+
 def test_the_compared_agent_does_not_light_the_triage_card(jev_key, monkeypatch):
     """The card belongs to the classifier that routed."""
     monkeypatch.setattr(typesafe, "ask", jev_says(needs_diagnostics=0.98))
@@ -411,6 +471,40 @@ def test_a_compared_agent_that_blows_up_does_not_fail_the_request(jev_key, monke
     assert "SECRET" not in json.dumps(out.comparison) and "SECRET" not in caplog.text
 
 
+def test_a_compared_jev_that_fails_is_not_logged_as_a_fallback(jev_key, monkeypatch, caplog, fresh_stats):
+    """Nothing falls back in a comparison, so the log must not say anything did
+    - /metrics already agrees - and the line names the exception type only."""
+    monkeypatch.setattr(typesafe, "ask", jev_down("api.typesafe.ai answered HTTP 503: overloaded"))
+    with caplog.at_level("WARNING"):
+        out, _ = handle(compare=True)
+
+    assert out.comparison["other"]["error"] == _router.JEV_DID_NOT_ANSWER
+    assert "falling back" not in caplog.text
+    assert "overloaded" not in caplog.text
+    assert "Jev could not answer a comparison (TypeSafeUnavailable)" in caplog.text
+    assert fresh_stats == {"answered": 0, "fell_back": 0}
+
+
+def test_a_compared_jev_that_blows_up_logs_no_traceback(jev_key, monkeypatch, caplog):
+    def boom(*a, **k):
+        raise RuntimeError("https://api.example.invalid/?key=ts-SECRET")
+
+    monkeypatch.setattr(typesafe, "ask", boom)
+    with caplog.at_level("WARNING"):
+        handle(compare=True)
+    assert "SECRET" not in caplog.text and "Traceback" not in caplog.text
+    assert "Jev could not answer a comparison (RuntimeError)" in caplog.text
+
+
+def test_jev_failing_to_route_is_still_logged_as_a_fallback(jev_key, monkeypatch, caplog, fresh_stats):
+    """The routing side is unchanged: that one did fall back."""
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    with caplog.at_level("WARNING"):
+        handle(triage="jev")
+    assert "falling back to the triage agent" in caplog.text
+    assert fresh_stats["fell_back"] == 1
+
+
 def test_a_throttled_comparison_says_so(jev_key, monkeypatch):
     monkeypatch.setattr(typesafe, "ask", jev_says(needs_diagnostics=0.98))
     real = agents()
@@ -426,7 +520,7 @@ def test_a_throttled_comparison_says_so(jev_key, monkeypatch):
     assert not out.throttled, "the answer was not throttled; only the comparison was"
 
 
-def test_a_slow_comparison_is_left_behind_rather_than_waited_for(jev_key, monkeypatch):
+def test_a_slow_comparison_is_left_behind_rather_than_waited_for(jev_key, monkeypatch, fresh_spend):
     def slow(*a, **k):
         time.sleep(0.3)
         return jev_says(needs_diagnostics=0.98)(*a, **k)
@@ -438,6 +532,13 @@ def test_a_slow_comparison_is_left_behind_rather_than_waited_for(jev_key, monkey
     assert time.time() - started < 0.25
     assert out.comparison["other"]["error"] == "still running when the answer was ready"
     assert out.reply == "answer from diagnostics"
+    assert out.comparison_tokens == 0, "this answer never saw what it spent"
+
+    # It was billed all the same, so /metrics counts it once it finishes.
+    deadline = time.time() + 5
+    while fresh_spend["jev"] == 0 and time.time() < deadline:
+        time.sleep(0.02)
+    assert fresh_spend == {"jev": 1316, "agent": 0}
 
 
 def test_a_comparison_is_still_shown_when_the_chosen_agent_was_throttled(jev_key, monkeypatch):
@@ -523,6 +624,35 @@ def test_a_jev_routed_answer_is_not_served_to_someone_who_chose_the_agent(jev_ke
     assert third.cached, "the same choice still shares the answer"
 
 
+def test_a_bare_fault_code_answer_is_shared_whichever_classifier_was_picked(jev_key):
+    """No classifier reads a bare fault code, so the choice made no difference
+    to the answer and must not cost anyone a second diagnostics run."""
+    handle("what does P0420 mean")
+    out, seen = handle("what does P0420 mean", triage="jev")
+    assert out.cached
+    assert _router.ask.called.count("diagnostics") == 1
+    assert the(seen, "route")["triage"]["used"] == "none"
+
+
+def test_an_answer_the_agent_routed_for_a_jev_chooser_is_kept_as_the_agents(jev_key, monkeypatch):
+    """Jev could not answer, so the agent routed it. Kept under Jev's name, the
+    next visitor who picked Jev would be handed the agent's routing as Jev's."""
+    monkeypatch.setattr(_router, "worth_caching", lambda *a: True)
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    first, _ = handle(triage="jev")
+    assert first.triage["used"] == "agent"
+    assert _router.ANSWERS.get("jev\nmy wipers squeak") is None
+    assert _router.ANSWERS.get("my wipers squeak") is not None, "kept as the agent's: the default here"
+
+    jev = jev_says(needs_diagnostics=0.98)
+    monkeypatch.setattr(typesafe, "ask", jev)
+    second, _ = handle(triage="jev")
+    assert not second.cached and jev.asked == ["my wipers squeak"], "Jev read it this time"
+
+    third, _ = handle()
+    assert third.cached, "an auto visitor here gets the agent's answer, which is what auto means"
+
+
 def test_picking_the_servers_own_classifier_shares_its_cache():
     """It changes nothing about how the answer is made."""
     handle("what does P0420 mean")
@@ -579,6 +709,16 @@ def test_a_comparison_has_its_own_span_so_decisions_are_still_counted_once(jev_k
     assert compare["chosen"] == "agent" and compare["other"] == "jev"
     assert compare["agrees"] is False and "route" in compare["differences"]
     assert next(s for s in spans if s["name"] == "chat.request")["compared"] is True
+
+
+def test_a_compare_row_never_sets_a_classifier_against_itself(jev_key, monkeypatch, spans):
+    """The runbook's "how often do they disagree" reads these rows. An agent
+    compared with itself would count its own run-to-run wobble as Jev vs LLM."""
+    monkeypatch.setattr(typesafe, "ask", jev_down())
+    handle(triage="jev", compare=True)
+    compare = next(s for s in spans if s["name"] == "routing.compare")
+    assert (compare["chosen"], compare["other"]) == ("agent", "jev")
+    assert compare["other_ok"] is False and "agrees" not in compare
 
 
 # ------------------------------------------------------------------ the API
@@ -649,7 +789,7 @@ def test_the_stream_carries_the_choice_and_the_comparison(api, jev_key, monkeypa
     assert kinds.index("compare") > kinds.index("route"), "the card follows the route"
 
 
-def test_metrics_count_the_toggle_and_what_comparing_cost(api, jev_key, monkeypatch):
+def test_metrics_count_the_toggle_and_what_comparing_cost(api, jev_key, monkeypatch, fresh_spend):
     monkeypatch.setattr(typesafe, "ask", jev_says(needs_diagnostics=0.98))
     api.post("/chat", json={"message": "my wipers squeak", "triage": "jev", "compare": True})
     api.post("/chat", json={"message": "my wipers squeak", "triage": "agent"})
@@ -657,7 +797,20 @@ def test_metrics_count_the_toggle_and_what_comparing_cost(api, jev_key, monkeypa
 
     m = api.get("/metrics").json()
     assert (m["triage_choice_jev"], m["triage_choice_agent"], m["triage_compare"]) == (1, 1, 1)
-    assert m["compare_tokens"] == 920, "the agent's turn, spent on the comparison"
+    assert m["compare_tokens_agent"] == 920, "the agent's turn, spent on the comparison"
+    assert m["compare_tokens_jev"] == 0, "Jev routed that one; it was not compared"
+
+
+def test_what_comparing_cost_is_counted_per_classifier(api, jev_key, monkeypatch, fresh_spend):
+    """A Jev token and an agent token are priced about ten times apart, so one
+    sum would move more for the cheap classifier than for the dear one."""
+    monkeypatch.setattr(typesafe, "ask", jev_says(needs_diagnostics=0.98))
+    api.post("/chat", json={"message": "my wipers squeak", "compare": True})
+    api.post("/chat", json={"message": "my wipers squeak", "triage": "jev", "compare": True})
+
+    m = api.get("/metrics").json()
+    assert (m["compare_tokens_jev"], m["compare_tokens_agent"]) == (1316, 920)
+    assert "compare_tokens" not in m
 
 
 def test_the_page_can_tell_whether_jev_is_there_to_pick(jev_key):
