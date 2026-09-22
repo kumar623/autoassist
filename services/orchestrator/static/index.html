@@ -640,9 +640,21 @@ function onActivity(ev) {
     else if (ev.backend) said.push(ev.backend === 'jev'
       ? 'Classified by Jev: four probabilities, thresholds in code.'
       : 'Classified by the triage agent: gpt-4.1-mini writing JSON.');
+    // Jev's maintenance question, asked when only the keyword net flagged the
+    // message. Shadow unless the server says the exemption is on.
+    const m = ev.maintenance;
+    if (m && typeof m.p === 'number') {
+      said.push(m.exempted
+        ? 'Maintenance question (Jev ' + m.p.toFixed(2) + '): the keyword net’s safety flag was dropped.'
+        : 'Maintenance? Jev ' + m.p.toFixed(2) + (m.exemption_on ? '' : ' (shadow: recorded only)') + '.');
+    }
     routeEl.textContent = said.join('  ·  ');
     routeEl.className = ev.safety ? 'safety' : '';
     step('router', 'route', running.length ? running.join(' + ') : 'answered without an agent', 'done');
+    if (m && typeof m.p === 'number') {
+      step('router', 'maintenance', 'maintenance? jev ' + m.p.toFixed(2) + (m.exempted ? ' · flag dropped'
+        : m.exemption_on ? '' : ' · shadow'), 'done');
+    }
 
     if (read) {
       // The triage line already on the list, extended with what the keyword
@@ -659,6 +671,17 @@ function onActivity(ev) {
 
   if (ev.kind === 'compare') {
     drawCompare(ev);
+    return;
+  }
+
+  // The router's check of a finished answer on a safety-flagged message:
+  // "withheld: reassurance (Jev 0.98)", or what Jev made of one it passed.
+  if (ev.kind === 'check') {
+    const judge = ev.by === 'jev' && typeof ev.p === 'number' ? 'Jev ' + ev.p.toFixed(2) : ev.by;
+    const text = ev.withheld ? 'withheld: reassurance (' + judge + ')'
+      : ev.jev ? 'reassurance: Jev ' + ev.jev + ', regex passed it'
+      : 'reassurance: none' + (typeof ev.p === 'number' ? ' (Jev max ' + ev.p.toFixed(2) + ')' : '');
+    step('router', 'check.' + ev.name + '.' + ev.agent, text, ev.withheld ? 'failed' : 'done', undefined, true);
     return;
   }
 
