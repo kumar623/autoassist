@@ -154,11 +154,94 @@ dependencies
 | where timestamp > ago(7d)
 | where name == "chat.request"
 | where isnotempty(customDimensions["autoassist.withheld"])
-| project timestamp, operation_Id, withheld = customDimensions["autoassist.withheld"]
+| project timestamp, operation_Id, withheld = customDimensions["autoassist.withheld"],
+          by = customDimensions["autoassist.withheld_by"], p = customDimensions["autoassist.reassurance_p"]
 ```
 
 Then search the service logs for `withheld a diagnostics answer` to see the
-text and find the document it came from.
+text, the sentence that did it, and find the document it came from.
+
+There are two judges (finding 17). The regex runs first, as it always has. With
+a TypeSafe key, Jev then scores each sentence of an answer the regex passed, one
+request per sentence, and 0.5 or more withholds it. The fault code list's own
+"safe to drive with care (fault code list, P0420)" line is never sent to Jev -
+code exempts it. On the request span:
+
+- `withheld_by` - `regex` or `jev`, only when something was withheld.
+- `reassurance_p` - Jev's highest sentence score, withheld or not. Clean answers
+  measured 0.02 at most, reassuring sentences 0.89-0.99; anything in between is
+  worth reading.
+- `reassurance_judge` - who judged: `jev`, or `regex` alone.
+- `reassurance_jev_failed` - Jev was meant to judge and could not, so the regex
+  decided alone.
+
+The trace for that reply carries a `router` line with `checks.reassurance`, and
+the panel shows "withheld: reassurance (Jev 0.98)".
+
+---
+
+### Jev's judgements: switches and counters
+
+Three checks in `services/orchestrator/judgements.py` ask Jev a yes/no question.
+Each needs only `TYPESAFE_API_KEY` (not `TRIAGE_BACKEND=jev`), waits at most
+`jev_triage.TIMEOUT` with no retry, and when Jev cannot answer leaves the
+decision to the code that was there before - so a server with no key behaves as
+it always did.
+
+| Check | Switch (default on) | Decides | When Jev cannot answer |
+|---|---|---|---|
+| reassurance | `JEV_REASSURANCE_CHECK=0` turns it off | withholds a safety answer at p >= 0.5 | `REASSURANCE` regex alone |
+| accepted call | `JEV_ACCEPTS_CALL_CHECK=0` | escalation for a yes to an advisor offer, p >= 0.5 | `YES` / `NOT_YES` patterns |
+| maintenance | `JEV_MAINTENANCE_CHECK=0` | nothing, unless the exemption below is on | nothing is exempted |
+
+A switch set to a word rather than a number is logged and read as its default;
+it never stops the app starting.
+
+`/metrics` has `jev_check_<name>_answered`, `jev_check_<name>_fell_back` and
+`jev_check_<name>_tokens` for `reassures`, `accepts_call` and `maintenance`. A
+rising `fell_back` with `answered` flat is the key revoked or the account spent:
+the regexes are deciding alone, safely and silently.
+
+**The maintenance check runs in shadow.** When only the keyword net flagged a
+message (`safety_source = keyword`, the classifier said no), Jev is asked
+whether it is just an interval question, and the answer is recorded as
+`maintenance_p` on `routing.decision`, in the route event and in the trace. It
+changes nothing. To see what it would change:
+
+```kql
+dependencies
+| where timestamp > ago(30d)
+| where name == "routing.decision"
+| where isnotempty(customDimensions["autoassist.maintenance_p"])
+| project timestamp, operation_Id, p = todouble(customDimensions["autoassist.maintenance_p"]),
+          word = customDimensions["autoassist.keyword_match"], backend = customDimensions["autoassist.backend"],
+          p_safety = customDimensions["autoassist.p_safety"]
+| order by p desc
+```
+
+Read the messages behind the high ones in the logs (`shadow: ... reads as a
+maintenance question`). If every one at 0.7 or more really was only asking when
+a part is due, and the owner agrees to change the safety net, turn the
+exemption on:
+
+    az containerapp update -g "$RG" -n "$APP" --set-env-vars KEYWORD_NET_MAINTENANCE_EXEMPTION=1
+
+It then drops the keyword net's flag only when all of these hold: Jev answered,
+at 0.7 or more; the classifier said no safety issue; and, when Jev routed, its
+own safety score was 0.10 or less. Never when Jev did not answer, and never on
+the keyword fallback. Each drop is logged (`safety flag dropped`) and recorded
+as `safety_source = none` with `safety_exemption = maintenance question`:
+
+```kql
+dependencies
+| where timestamp > ago(7d)
+| where name == "routing.decision"
+| where customDimensions["autoassist.safety_exemption"] == "maintenance question"
+| project timestamp, operation_Id, p = customDimensions["autoassist.maintenance_p"],
+          word = customDimensions["autoassist.keyword_match"]
+```
+
+Set it back to `0` to undo; nothing else needs to change.
 
 ---
 
