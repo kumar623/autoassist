@@ -1167,3 +1167,40 @@ def test_both_classifiers_share_one_backstop():
     for d in (by_agent, by_jev):
         assert d.safety and d.safety_source == "keyword"
         assert d.intents == ["booking"] and d.booking_added_by_keyword
+
+
+# ---------------------------------------- an offer need not be a question
+
+
+@pytest.mark.parametrize("offer", [
+    "If you want, I can arrange for a service advisor to call you to discuss the next steps.",
+    "If you want, I can arrange a call from a service advisor to help you with the next steps.",
+    "Would you like a service advisor to call you to arrange a check?",
+    "A service advisor can phone you if you wish.",
+])
+def test_an_offer_of_an_advisors_call_is_recognised_however_it_ends(offer):
+    """The live agent offers the call as a question or as a statement; on 22 Sep
+    a full stop was enough for "absolutely" to be ignored."""
+    assert _router.ADVISOR_OFFER.search(f"The documents do not cover this. {offer}")
+
+
+@pytest.mark.parametrize("fact", [
+    "A service advisor has already been asked to call you about this - ticket TK-519169.",
+    "A service advisor will contact you within one hour.",
+    "Have a service advisor check the pads at your next visit.",
+])
+def test_a_statement_about_an_advisor_is_not_an_offer(fact):
+    assert not _router.ADVISOR_OFFER.search(fact)
+
+
+def test_a_yes_to_an_offer_ending_in_a_full_stop_reaches_escalation(monkeypatch):
+    """The live conversation that failed: the sunroof, then "absolutely"."""
+    from services.orchestrator import judgements
+    monkeypatch.setattr(judgements, "accepts_call", lambda offer, message: 0.98)
+    history = [
+        {"role": "customer", "text": "my sunroof makes a rattling noise over bumps"},
+        {"role": "assistant", "text": "The service library does not cover sunroof noises. If you want, I can "
+                                      "arrange for a service advisor to call you for further assistance."},
+    ]
+    d = _router._with_accepted_offer(TriageDecision(intents=["diagnostics"]), "absolutely", history)
+    assert "escalation" in d.intents

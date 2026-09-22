@@ -237,7 +237,21 @@ SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 # appointment question, escalation's has no such clause, and a bare "yes please"
 # that matches nothing goes to diagnostics - which is told never to say that
 # someone will call. So, like BOOKING_WORDS, in code: see _with_accepted_offer.
-ADVISOR_OFFER = re.compile(r"[^.!?\n]*\badvis[eo]rs?\b[^.!?\n]*\?", re.IGNORECASE)
+#
+# An offer is a sentence about an advisor that asks ("Would you like a service
+# advisor to call you?") or offers ("If you want, I can arrange for a service
+# advisor to call you."). Only the question was recognised at first, and the live
+# agent writes the second as often as not: on 22 Sep "absolutely" went back to
+# diagnostics because the offer before it ended in a full stop. Statements of
+# fact - "an advisor has already been asked to call you", "will call you within
+# the hour" - are neither, and a yes after them is not accepting anything.
+_OFFERING = r"(?:if you (?:want|wish|would like|'d like|like)|(?:i|we) can (?:arrange|ask|get|have)|shall i|happy to arrange)"
+ADVISOR_OFFER = re.compile(
+    r"[^.!?\n]*\badvis[eo]rs?\b[^.!?\n]*\?"
+    rf"|[^.!?\n]*\b{_OFFERING}\b[^.!?\n]*\badvis[eo]rs?\b[^.!?\n]*[.!]?"
+    rf"|[^.!?\n]*\badvis[eo]rs?\b[^.!?\n]*\b{_OFFERING}\b[^.!?\n]*[.!]?",
+    re.IGNORECASE,
+)
 YES = re.compile(
     r"^\s*(?:yes|yeah|yep|yup|sure|please|go ahead|(?:ok|okay)\b[\s,]*(?:please|go ahead|do it|sure))\b",
     re.IGNORECASE,
