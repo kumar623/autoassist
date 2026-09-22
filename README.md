@@ -72,6 +72,10 @@ a regex checks the raw text independently. Either firing is enough. When the
 regex catches something triage missed, it logs a warning — a signal the triage
 prompt needs work, captured automatically.
 
+With a TypeSafe key, Jev also judges whether a safety answer reassures, whether a
+yes accepts the advisor's call, and (shadow only) whether "brake" is just a
+maintenance question — finding 17.
+
 ### Jev or the LLM, side by side
 
 Above the message box on the chat page is **Triage: Jev | LLM** and **Compare
@@ -151,7 +155,7 @@ sign-in. The image installs only what the service imports
 ## What this is actually for
 
 The system works, but the interesting part is
-**[docs/evaluation.md](docs/evaluation.md)** — sixteen numbered findings: what
+**[docs/evaluation.md](docs/evaluation.md)** — seventeen numbered findings: what
 went wrong or was measured, why, and what changed. Short version:
 
 1. **The agent skipped retrieval on safety questions.** A rule that only forbids
@@ -280,6 +284,7 @@ services/orchestrator/
   retrieval.py           hybrid search, relevance floor, per-source cap
   tools.py               tool schemas and handlers
   jev_triage.py          routing by Jev's probabilities (TRIAGE_BACKEND=jev)
+  judgements.py          Jev judging replies and messages: reassurance, an accepted call, maintenance
   typesafe.py            the TypeSafe API that Jev answers through
   booking.py             bookings in a local file (BOOKING_BACKEND=file), and tickets
   zoho_bookings.py       bookings in Zoho Bookings (BOOKING_BACKEND=zoho)
@@ -295,7 +300,7 @@ scripts/                 index building, search_test.py, deploy target and GitHu
 evals/                   golden set (20 cases), routing set (72), red team, Jev comparison
 infra/                   Terraform for a fresh environment (never applied to the live one)
 docs/
-  evaluation.md          the sixteen findings
+  evaluation.md          the seventeen findings
   deploy.md, runbook.md  shipping it, and running it at 2am
   decisions/             why things are the way they are
 tests/                   offline tests: `make test`

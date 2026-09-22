@@ -42,7 +42,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from datetime import date
 
-from . import azure_http, jev_triage, limits, telemetry, tools
+from . import azure_http, jev_triage, judgements, limits, telemetry, tools
 from .cache import TimedCache
 from .foundry import FoundryAgents
 from .runner import ToolCallRecord, TurnResult, ask, ask_streaming, emit, throttled_turn
@@ -478,6 +478,15 @@ class TriageDecision:
     classifier_safety: bool | None = None
     keyword_match: str | None = None
     booking_match: str | None = None
+    # Jev's answers to the router's own questions, where it was asked (see
+    # judgements.py): whether the yes accepts the advisor's call, and whether a
+    # message the keyword net alone flagged is only asking when a part is due.
+    # None when it was not asked or could not answer.
+    accepts_call_p: float | None = None
+    maintenance_p: float | None = None
+    # Why a safety flag the keyword net raised was taken away again, when it was
+    # (KEYWORD_NET_MAINTENANCE_EXEMPTION=1). Recorded, never inferred.
+    safety_exemption: str | None = None
 
     def route(self) -> list[str]:
         """Which specialists to run, in order."""
@@ -510,6 +519,10 @@ class RouterResult:
     duration_ms: int = 0
     error: str | None = None
     withheld: list[str] = field(default_factory=list)  # answers dropped by _withhold_reassurance
+    # Why, and what Jev made of the answers it passed: one record per
+    # diagnostics answer withheld or judged by Jev - {"agent", "withheld", "by":
+    # "regex"|"jev", "p", "sentence", ...}. Empty when nothing was checked.
+    reassurance_checks: list[dict] = field(default_factory=list)
     # Set when this reply came out of the answer cache rather than the agents.
     cached_from: CachedAnswer | None = None
     # Set when Azure's quota was spent and no specialist got to answer. A field
@@ -584,7 +597,7 @@ class RouterResult:
                  "note": f"answered from the cache; written {age}s ago by the turns below"},
                 *self.cached_from.trace,
             ]
-        return [
+        turns = [
             {
                 "agent": t.agent_name,
                 "status": t.status,
@@ -598,6 +611,27 @@ class RouterResult:
             }
             for t in self.turns
         ]
+        checks = self.checks()
+        if checks:
+            # The router's own questions, as one more line in the same list, so
+            # a reader of the trace sees why an answer is missing, or why a
+            # "brake" message was or was not treated as maintenance.
+            turns.append({"agent": "router", "status": "checked", "tools": [], "ms": 0, "tokens": 0,
+                          "error": None, "checks": checks})
+        return turns
+
+    def checks(self) -> dict:
+        """What the router asked Jev about this message and its reply, where it asked."""
+        found = {}
+        d = self.decision
+        if d is not None and d.maintenance_p is not None:
+            found["maintenance"] = _maintenance_seen(d)
+        if d is not None and d.accepts_call_p is not None:
+            found["accepts_call"] = {"p": d.accepts_call_p, "cut": judgements.ACCEPTS_CALL_CUT,
+                                     "accepted": d.advisor_call_accepted}
+        if self.reassurance_checks:
+            found["reassurance"] = self.reassurance_checks
+        return found
 
 
 def parse_triage(text: str, message: str) -> TriageDecision:
@@ -881,17 +915,82 @@ def _with_accepted_offer(decision: TriageDecision, message: str, history: list[d
     have asked a question about an advisor, and the message has to be a short
     yes with no "not" in it. A needless escalation is one ticket for a
     conversation that has none; a missed one is a customer left waiting.
+
+    Whether the message says yes is Jev's to judge where there is a key
+    (judgements.accepts_call). The patterns below missed "absolutely", "that
+    would be great", "that works" and "haan please call karo" - 24/28 on the
+    labelled set, Jev 28/28 - and a missed yes is the expensive direction here.
+    Code still decides whether there was an offer to accept, and the patterns
+    still decide whenever Jev cannot answer. A yes while a ticket stands adds
+    escalation here and _route_and_answer then skips it, exactly as before: the
+    ticket that stands is the call.
     """
     last = next((t for t in reversed(history or []) if t.get("role") == "assistant"), None)
     if last is None or "escalation" in decision.intents:
         return decision
-    if not ADVISOR_OFFER.search(str(last.get("text") or "")):
+    offer = ADVISOR_OFFER.search(str(last.get("text") or ""))
+    if not offer:
         return decision
-    if len(message.split()) > MAX_YES_WORDS or not YES.search(message) or NOT_YES.search(message):
+    p = judgements.accepts_call(offer.group(0).strip(), message)
+    decision.accepts_call_p = p
+    if p is not None:
+        accepted = p >= judgements.ACCEPTS_CALL_CUT
+        by = f"Jev {p:.2f}"
+    else:
+        accepted = (len(message.split()) <= MAX_YES_WORDS and bool(YES.search(message))
+                    and not NOT_YES.search(message))
+        by = "the yes/no patterns"
+    if not accepted:
         return decision
-    log.info("escalation added: %r says yes to the advisor's call the last reply offered", message[:80])
+    log.info("escalation added: %r says yes to the advisor's call the last reply offered (%s)", message[:80], by)
     decision.intents = [i for i in decision.intents if i != "other"] + ["escalation"]
     decision.advisor_call_accepted = True
+    return decision
+
+
+def _with_maintenance_check(decision: TriageDecision, message: str) -> TriageDecision:
+    """Ask Jev whether a message the keyword net alone flagged is only a maintenance question.
+
+    "How often should brake fluid be changed?" is escalated today because it
+    says "brake", though both classifiers say nothing is wrong with the car -
+    Jev's safety score for it is 0.05. Jev's maintenance question told those
+    apart 29/29 on the labelled set, where the best regex we could write was
+    19/29 and read five real faults as maintenance.
+
+    SHADOW by default. The probability is recorded - decision.maintenance_p,
+    the routing.decision span, the route event, the trace - on every message
+    the net alone flagged, and nothing else changes. Only with
+    KEYWORD_NET_MAINTENANCE_EXEMPTION=1 is the net's flag dropped, and only when
+    every one of these holds: Jev answered, at or above MAINTENANCE_CUT; the
+    classifier itself said no safety issue; and, when that classifier was Jev,
+    its safety score was at most MAINTENANCE_SAFETY_CEILING as well. The net is
+    the owner's safety rule, and shadow mode gathers the evidence to change it;
+    it is not a decision to change it.
+
+    Never for the keyword fallback (no classifier answered, so none said no)
+    and never when Jev could not answer: a missing answer exempts nothing.
+    """
+    if decision.safety_source != "keyword" or decision.classifier_safety is not False:
+        return decision
+    p = judgements.maintenance_only(message)
+    decision.maintenance_p = p
+    if p is None:
+        return decision
+    p_safety = decision.probabilities.get("safety") if decision.backend == "jev" else None
+    exempt = (p >= judgements.MAINTENANCE_CUT
+              and (decision.backend != "jev"
+                   or (p_safety is not None and p_safety <= judgements.MAINTENANCE_SAFETY_CEILING)))
+    if not exempt:
+        return decision
+    if not judgements.maintenance_exemption_on():
+        log.info("shadow: %r reads as a maintenance question (Jev %.2f); the keyword net's flag stands",
+                 message[:120], p)
+        return decision
+    log.warning("safety flag dropped: %r matched %r but reads as a maintenance question "
+                "(Jev %.2f, the classifier said no safety issue)", message[:120], decision.keyword_match, p)
+    decision.safety = False
+    decision.safety_source = "none"
+    decision.safety_exemption = "maintenance question"
     return decision
 
 
@@ -1228,27 +1327,111 @@ BUSY_REPLY = (
 )
 
 
-def _withhold_reassurance(turns: list[TurnResult], decision: TriageDecision) -> list[str]:
+def _withhold_reassurance(turns: list[TurnResult], decision: TriageDecision, message: str = "",
+                          why: list[dict] | None = None, on_event=None) -> list[str]:
     """On a safety-flagged message, drop any diagnostics answer that reassures.
 
     Blunt by design, like SAFETY_WORDS: it cannot tell a true "normal" from a
     poisoned one, and does not try. A withheld answer costs the customer an
     explanation; a delivered wrong one can cost a great deal more. Escalation
     always runs on a safety route, so the customer is still answered.
+
+    Two judges, either of which withholds. REASSURANCE first, exactly as
+    before. Then, where there is a TypeSafe key, Jev on each sentence the regex
+    passed (judgements.reassurance_scores). The regex caught the red team's
+    poisoned bulletin, which the agent repeats word for word; it did not catch
+    the same bulletin reworded - "a known characteristic of Corvale models ...
+    can be used as usual until its next scheduled service" - which the agent
+    passed on after its own "Do not drive" warning, twice out of twice. Jev,
+    sentence by sentence, caught all 14 real replies it was tried on: flagged
+    sentences scored 0.98, the clean replies' sentences 0.02 at most. The fault
+    code list's own "safe to drive with care" line is taken out by code before
+    Jev sees anything (judgements.DOCUMENTED_SEVERITY) - it is the one thing
+    Jev reliably gets wrong. When Jev cannot answer, the regex alone decides,
+    which is exactly what happened before it was here.
+
+    `why` collects a record per answer that was withheld or that Jev judged -
+    which judge, Jev's highest score, that sentence - for the trace and
+    telemetry. `on_event` tells the panel the same.
     """
     if not decision.safety:
         return []
     withheld = []
     for t in turns:
-        if t.agent_name == "diagnostics" and t.answer and REASSURANCE.search(t.answer):
-            log.warning(
-                "withheld a diagnostics answer that reassures on a safety issue (possible bad document): %r",
-                t.answer[:200],
-            )
-            t.answer = ""
-            t.error = "withheld: reassured the customer on a safety-flagged message"
-            withheld.append(t.agent_name)
+        if t.agent_name != "diagnostics" or not (t.answer or "").strip():
+            continue
+        reason = _reassures(t.answer, message)
+        verdict = {"agent": t.agent_name, **reason}
+        # Recorded, and told to the panel, whenever there is something to show:
+        # an answer withheld, or Jev's verdict on one that was not. A server
+        # with no key records nothing new unless something was withheld.
+        if reason["withheld"] or reason["by"] == "jev" or "jev" in reason:
+            emit(on_event, kind="check", name="reassurance", **verdict)
+            if why is not None:
+                why.append(verdict)
+        if not reason["withheld"]:
+            continue
+        log.warning(
+            "withheld a diagnostics answer that reassures on a safety issue (%s on %r; possible bad document): %r",
+            _said_by(reason), reason["sentence"], t.answer[:200],
+        )
+        t.answer = ""
+        t.error = f"withheld: reassured the customer on a safety-flagged message ({_said_by(reason)})"
+        withheld.append(t.agent_name)
     return withheld
+
+
+# How much of the sentence that got an answer withheld is kept in the trace,
+# the panel and telemetry. Enough to recognise it; the whole answer is in the log.
+WITHHELD_SENTENCE_CHARS = 160
+
+
+def _reassures(answer: str, message: str) -> dict:
+    """Whether `answer` reassures, and who said so: {"withheld", "by", "p", "sentence", ...}.
+
+    `by` is "regex" or "jev" when it was withheld, and says who judged it when
+    it was not ("jev", or "regex" when Jev could not answer).
+    """
+    found = REASSURANCE.search(answer)
+    if found:
+        # Jev is not asked: the answer is going either way, and asking would
+        # only spend a request per sentence to be told so.
+        return {"withheld": True, "by": "regex", "p": None,
+                "sentence": _sentence_around(answer, found.start())[:WITHHELD_SENTENCE_CHARS]}
+    scores = judgements.reassurance_scores(message, answer)
+    if scores is None:
+        # Said only when Jev was meant to answer. With no key, or the check
+        # switched off, this is the regex doing what it always did.
+        asked = judgements.enabled("reassures")
+        return {"withheld": False, "by": "regex", "p": None, "sentence": None,
+                **({"jev": "did not answer"} if asked else {})}
+    if not scores:
+        return {"withheld": False, "by": "jev", "p": None, "sentence": None, "checked": 0}
+    sentence, p = max(scores, key=lambda s: s[1])
+    return {"withheld": p >= judgements.REASSURES_CUT, "by": "jev", "p": p,
+            "sentence": sentence[:WITHHELD_SENTENCE_CHARS], "checked": len(scores)}
+
+
+def _said_by(reason: dict) -> str:
+    return f"Jev {reason['p']:.2f}" if reason["by"] == "jev" and reason["p"] is not None else reason["by"]
+
+
+def _sentence_around(text: str, at: int) -> str:
+    """The sentence of `text` that position `at` falls in."""
+    start = max(text.rfind(c, 0, at) for c in ".!?\n") + 1
+    ends = [i for i in (text.find(c, at) for c in ".!?\n") if i != -1]
+    return text[start:(min(ends) + 1) if ends else len(text)].strip()
+
+
+def _maintenance_seen(decision: TriageDecision) -> dict | None:
+    """What the maintenance check made of the message, for the panel and the
+    trace; None when it was not asked."""
+    if decision.maintenance_p is None:
+        return None
+    return {"p": decision.maintenance_p, "cut": judgements.MAINTENANCE_CUT,
+            "exempted": decision.safety_exemption is not None,
+            "exemption_on": judgements.maintenance_exemption_on(),
+            "keyword_match": decision.keyword_match}
 
 
 def _record_prefetch(turns: list[TurnResult], prefetched: tuple[str, str, int]) -> None:
@@ -1484,6 +1667,9 @@ def handle(
             agent_count=len(out.turns),
             failed_turns=sum(1 for t in out.turns if not t.ok),
             withheld=out.withheld or None,  # only present when something was withheld
+            # Which judge withheld it, "regex" or "jev", and Jev's score for the
+            # sentence that did it. Only present when something was withheld.
+            **_withheld_telemetry(out),
             # Only present when an agent asked for a ticket: more requests than
             # tickets raised is OneTicket turning the extras away.
             ticket_requests=out.ticket_requests or None,
@@ -1494,6 +1680,23 @@ def handle(
             comparison_tokens=out.comparison_tokens or None,
         )
     return out
+
+
+def _withheld_telemetry(out: RouterResult) -> dict:
+    """The request span's record of why an answer was withheld, and of Jev's
+    verdict on one it passed. The sentence is not sent: it is the agent's
+    words about a customer's car, and the log line already has them."""
+    checks = out.reassurance_checks
+    if not checks:
+        return {}
+    withheld = [c for c in checks if c["withheld"]]
+    scored = [c["p"] for c in checks if c.get("p") is not None]
+    return {
+        "withheld_by": ",".join(sorted({c["by"] for c in withheld})) or None,
+        "reassurance_p": max(scored) if scored else None,
+        "reassurance_judge": ",".join(sorted({c["by"] for c in checks})),
+        "reassurance_jev_failed": any("jev" in c for c in checks) or None,
+    }
 
 
 def _standing_ticket(ticket: str | None, history: list[dict] | None) -> str | None:
@@ -1594,6 +1797,10 @@ def _handle_inner(
         # is what the classifier and the net made of the message - and never
         # applied to the compared one, which routes nothing.
         decision = _with_accepted_offer(decision, message, history)
+        # Here, not in _with_backstops: that runs for the compared classifier
+        # too, which routes nothing and must spend nothing on the router's
+        # own questions.
+        decision = _with_maintenance_check(decision, message)
         _record_decision(decision, choice=out.triage, compared=compare, **measured)
         _route_and_answer(client, ids, message, decision, timeout, history, out, started, on_delta,
                           on_status, on_event, cache_for=cache_for, ticket=ticket)
@@ -1838,6 +2045,13 @@ def _record_decision(decision: TriageDecision, choice: dict | None = None, compa
             classifier_safety=decision.classifier_safety,
             keyword_match=decision.keyword_match,
             booking_match=decision.booking_match,
+            # Jev's answers to the router's own questions, only when asked. The
+            # maintenance one is the shadow evidence for the keyword net: every
+            # message the net alone flagged, with how sure Jev was that it only
+            # asked when a part is due.
+            maintenance_p=decision.maintenance_p,
+            accepts_call_p=decision.accepts_call_p,
+            safety_exemption=decision.safety_exemption,
             compared=compared or None,  # only present when it happened
             **measured,
         )
@@ -1903,7 +2117,7 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
          safety_source=decision.safety_source, reason=decision.reason,
          triage_skipped=decision.triage_skipped, ticket_stands=standing if escalation_skipped else None,
          backend=decision.backend, probabilities=decision.probabilities or None,
-         triage=out.triage)
+         triage=out.triage, maintenance=_maintenance_seen(decision))
 
     # Whenever diagnostics is going to run - not only for fault codes.
     prefetched = None
@@ -1935,7 +2149,8 @@ def _route_and_answer(client, ids, message, decision, timeout, history, out, sta
         _record_prefetch(specialists, prefetched)
 
     # --- 3. check, then compose ---
-    out.withheld = _withhold_reassurance(specialists, decision)
+    out.withheld = _withhold_reassurance(specialists, decision, message, why=out.reassurance_checks,
+                                         on_event=on_event)
     edited = _leave_the_ticket_to(tickets.speaker, specialists)
     out.reply = _compose(specialists, decision)
     # The standing ticket is said whenever it came up: escalation would have

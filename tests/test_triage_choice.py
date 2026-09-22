@@ -207,9 +207,10 @@ def test_the_route_event_only_gained_a_field():
     _, seen = handle()
     route = the(seen, "route")
     assert set(route) == {"kind", "agents", "safety", "safety_source", "reason", "triage_skipped",
-                          "ticket_stands", "backend", "probabilities", "triage"}
+                          "ticket_stands", "backend", "probabilities", "triage", "maintenance"}
     assert route["agents"] == ["diagnostics"] and route["backend"] == "agent"
     assert route["probabilities"] is None and route["safety"] is False
+    assert route["maintenance"] is None, "only set when Jev was asked the maintenance question"
 
 
 def test_an_auto_answer_is_cached_under_the_plain_question():

@@ -37,7 +37,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import jev_triage, library, limits, roster, telemetry, typesafe
+from . import jev_triage, judgements, library, limits, roster, telemetry, typesafe
 from . import router as routing
 from .foundry import FoundryAgents
 
@@ -226,6 +226,11 @@ def metrics() -> dict:
     m["triage_backend"] = roster.triage_backend()
     m["jev_answered"] = jev_triage.STATS["answered"]
     m["jev_fell_back"] = jev_triage.STATS["fell_back"]
+    # The same two counters for each of the router's own questions to Jev
+    # (judgements.py), and what they spent: jev_check_reassures_answered,
+    # jev_check_maintenance_fell_back and so on. A fallback there is the regex
+    # deciding alone, which is safe and silent - hence counted.
+    m.update(judgements.snapshot())
     # Spent on the compared classifier, which answers nobody. Not in
     # total_tokens - that is what the answers cost - but not hidden either. One
     # figure per classifier, because their tokens are priced about ten times
